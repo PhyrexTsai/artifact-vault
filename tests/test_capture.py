@@ -123,6 +123,16 @@ class CaptureTest(unittest.TestCase):
         root = make_project(files={"index.html": page})
         self.assertEqual(self.run_capture(publish_event(root, files={}))[0], "queued")
 
+    def test_markers_shown_as_text_are_ignored(self):
+        page = '<title><meta name="vault:skip"></title><textarea><meta name="vault:skip"></textarea>\n<p>x</p>\n'
+        root = make_project(files={"index.html": page})
+        self.assertEqual(self.run_capture(publish_event(root, files={}))[0], "queued")
+
+    def test_digest_distinguishes_operations(self):
+        self.assertNotEqual(capture.digest(b"p", [], ["a.css"], []), capture.digest(b"p", [("-a.css", b"")], [], []))
+        self.assertNotEqual(capture.digest(b"p", [("a", b"x\0b")], [], []),
+                            capture.digest(b"p", [("a", b"x"), ("b", b"")], [], []))
+
     def test_no_config_is_skipped(self):
         root = make_project(config=False)
         self.assertEqual(self.run_capture(publish_event(root)), (None, None))

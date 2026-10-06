@@ -39,20 +39,34 @@ SECRETS = [
 
 
 class _Meta(HTMLParser):
-    """Collect <meta name=... content=...> from real elements; comments and scripts are ignored."""
+    """Collect <meta name=... content=...> from real elements.
+
+    Comments, scripts, and styles are skipped by HTMLParser itself. Text containers
+    (textarea, title, template, noscript, xmp, plaintext) can show markup as text, so tags
+    inside them do not count.
+    """
+    TEXT_CONTAINERS = {"textarea", "title", "template", "noscript", "xmp", "plaintext"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.found = {}
+        self.found, self.depth = {}, 0
 
     def handle_starttag(self, tag, attrs):
-        if tag == "meta":
+        if tag in self.TEXT_CONTAINERS:
+            self.depth += 1
+        elif tag == "meta" and self.depth == 0:
             a = {k.lower(): (v or "") for k, v in attrs}
             name = a.get("name", "").strip().lower()
             if name.startswith("vault:") and name not in self.found:
                 self.found[name] = a.get("content", "").strip()
 
-    handle_startendtag = handle_starttag
+    def handle_startendtag(self, tag, attrs):
+        if tag not in self.TEXT_CONTAINERS:
+            self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag in self.TEXT_CONTAINERS and self.depth:
+            self.depth -= 1
 
 
 def page_meta(html_bytes):
@@ -145,11 +159,12 @@ def find_secret(blobs):
     return None
 
 
-def digest(main, extras):
-    h = hashlib.sha256(main)
-    for pub, data in sorted(extras):
-        h.update(b"\0" + pub.encode() + b"\0" + data)
-    return h.hexdigest()
+def digest(main, written, removed, remote):
+    """Unambiguous content id: each entry is typed and its bytes are hashed separately."""
+    sha = lambda b: hashlib.sha256(b).hexdigest()
+    entries = [["page", sha(main)]] + [["write", p, sha(d)] for p, d in sorted(written)] \
+        + [["remove", p] for p in sorted(removed)] + [["remote", p] for p in sorted(remote)]
+    return sha(json.dumps(entries, ensure_ascii=False).encode("utf-8"))
 
 
 def write_version(spool, main, extras, meta):
@@ -228,7 +243,7 @@ def capture(event, env=os.environ):
 
     # Every publish is kept. Skipping duplicates needs the versions in seq order, which only
     # push time has, so the digest is recorded here and compared there.
-    dig = digest(main, written + [(f"-{r}", b"") for r in sorted(removed)] + [(f"~{r}", b"") for r in sorted(remote)])
+    dig = digest(main, written, removed, remote)
 
     now = datetime.datetime.now(datetime.timezone.utc)
     version = re.sub(r"[^A-Za-z0-9._-]", "-", str(res.get("version") or "")).strip(".") \
