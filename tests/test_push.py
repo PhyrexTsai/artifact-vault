@@ -231,6 +231,28 @@ class PushTest(unittest.TestCase):
         self.assertFalse(self.state()["ok"])
         self.assertEqual(len(self.spooled()), 1)
 
+    def test_quoted_file_name_is_archived(self):
+        bare = make_vault()
+        root = make_project(bare)
+        name = '"logo".png'
+        with open(os.path.join(root, name), "wb") as fh:
+            fh.write(b"\x89PNG")
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write("<p>x</p>\n")
+        event = {"tool_name": "Artifact", "cwd": root,
+                 "tool_input": {"file_path": os.path.join(root, "index.html"), "files": {name: name}},
+                 "tool_response": {"url": ARTIFACT + "Q1", "title": "q", "version": "v1", "seq": 1}}
+        with redirect_stdout(io.StringIO()):
+            capture.capture(event, env=self.env)
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+
+    def test_blob_id_matches_git(self):
+        path = os.path.join(self.data, "x.bin")
+        with open(path, "wb") as fh:
+            fh.write(b"abc\r\n\x00")
+        self.assertEqual(push.blob_id(path), run("git", "hash-object", "--no-filters", path).strip())
+
     def test_version_name_with_tmp_is_pushed(self):
         bare = make_vault()
         publish(make_project(bare), self.env, version="v1.tmp-final")

@@ -18,6 +18,7 @@ Never fails the session: errors are recorded and the hook exits 0.
 """
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -153,6 +154,14 @@ def commit_pages(clone, subject):
         git("commit", "--quiet", "-m", subject, cwd=clone)
 
 
+def blob_id(path, algo="sha1"):
+    """Git's id for a file's bytes, computed without asking git, so no file name is ever
+    parsed by a git command. algo follows the repo's object format (sha1 or sha256)."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    return hashlib.new(algo, b"blob %d\0" % len(data) + data).hexdigest()
+
+
 def apply_version(clone, meta, folder):
     """Copy one version into pages/<id>/<version>/.
 
@@ -164,8 +173,8 @@ def apply_version(clone, meta, folder):
     for d, _, names in os.walk(folder):
         for n in names:
             sources.append(os.path.relpath(os.path.join(d, n), folder).replace(os.sep, "/"))
-    blobs = git("hash-object", "--no-filters", "--stdin-paths", cwd=folder,
-                inp="\n".join(sources) + "\n").split() if sources else []
+    algo = git("rev-parse", "--show-object-format", cwd=clone).strip() or "sha1"
+    blobs = [blob_id(os.path.join(folder, *src.split("/")), algo) for src in sources]
     dest = os.path.join(clone, *rel.split("/"))
     shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(folder, dest)
@@ -183,6 +192,8 @@ def push_vault(data_dir, key):
     target = read_json(os.path.join(spool, "vault.json"), {})
     url = target.get("vault")
     if not url:
+        # capture writes vault.json with every version; a spool without it was never written
+        # by a released capture, so there is no route to recover here.
         raise RuntimeError("spool has no vault.json")
     clone = os.path.join(data_dir, "vaults", key)
     with Lock(os.path.join(data_dir, "locks", f"{key}.lock")) as lock:

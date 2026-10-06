@@ -102,6 +102,8 @@ def safe_published(path):
     """A published path must stay inside the version folder."""
     if not isinstance(path, str) or not path or path.startswith("/") or "\\" in path:
         return None
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in path):
+        return None  # control characters (newlines, tabs) break tools that read path lists
     if any(p in ("", ".", "..") for p in path.split("/")):
         return None
     return path

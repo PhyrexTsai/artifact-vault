@@ -303,6 +303,12 @@ class CaptureTest(unittest.TestCase):
         with open(os.path.join(spool, "meta.json")) as fh:
             self.assertEqual(json.load(fh)["files_written"], ["diagrams/d.html"])
 
+    def test_control_characters_in_names_are_dropped(self):
+        root = make_project()
+        result, msg = self.run_capture(publish_event(root, files={"a\nb.css": "diagrams/d.html"}))
+        self.assertEqual(result, "queued")
+        self.assertIn("略過 1", msg["systemMessage"])
+
     def test_list_form_and_server_copies(self):
         root = make_project()
         files = {"diagrams/d.html": {"from": "diagrams/d.html"}, "copied.css": {"artifact": "x", "path": "a.css"},
