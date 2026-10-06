@@ -11,6 +11,7 @@ No network access and no writes: this runs inside a synchronous hook.
 
 CLI: `python3 resolve.py [dir]` prints one JSON object, or NO_VAULT.
 """
+import hashlib
 import json
 import os
 import re
@@ -44,7 +45,8 @@ def vault_name(url):
     tail = re.split(r"[/:]", url.rstrip("/"))[-1]
     if tail.endswith(".git"):
         tail = tail[:-4]
-    return re.sub(r"[^A-Za-z0-9._-]", "-", tail) or "vault"
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", tail).strip(".")
+    return name or "vault"
 
 
 def resolve(cwd):
@@ -66,15 +68,20 @@ def resolve(cwd):
         print(f"artifact-vault: ignoring {CONFIG}: missing \"vault\"", file=sys.stderr)
         return None
     url = os.path.expanduser(url.strip())
-    if not (URL.match(url) or os.path.isabs(url)):
+    if os.path.isabs(url):
+        url = os.path.normpath(url)
+    elif not URL.match(url):
         print(f"artifact-vault: ignoring {CONFIG}: \"vault\" must be a git URL or an absolute path", file=sys.stderr)
         return None
     name = vault_name(url)
+    # Two vaults can share a repo name (different owners), so the clone folder also
+    # carries a short hash of the full URL.
+    folder = f"{name}-{hashlib.sha256(url.encode()).hexdigest()[:10]}"
     data = os.environ.get("CLAUDE_PLUGIN_DATA")
     return {
         "vault": url,
         "name": name,
-        "clone": os.path.join(data, "vaults", name) if data else None,
+        "clone": os.path.join(data, "vaults", folder) if data else None,
         "project": root,
         "repo": repo_name(root),
     }

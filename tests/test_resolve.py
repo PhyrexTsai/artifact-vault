@@ -41,7 +41,7 @@ class ResolveTest(unittest.TestCase):
             got = resolve.resolve(root)
         self.assertEqual(got["vault"], VAULT)
         self.assertEqual(got["name"], "example-artifact")
-        self.assertEqual(got["clone"], "/tmp/plugin-data/vaults/example-artifact")
+        self.assertRegex(got["clone"], r"^/tmp/plugin-data/vaults/example-artifact-[0-9a-f]{10}$")
         self.assertEqual(got["repo"], "example-project")
         self.assertEqual(got["project"], root)
 
@@ -79,6 +79,21 @@ class ResolveTest(unittest.TestCase):
             with redirect_stderr(err):
                 self.assertIsNone(resolve.resolve(make_project(cfg)), cfg)
             self.assertIn("ignoring", err.getvalue())
+
+    def test_same_repo_name_different_owner_gets_different_clone(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": "/tmp/plugin-data"}):
+            a = resolve.resolve(make_project({"vault": "git@github.com:owner-a/artifacts.git"}))
+            b = resolve.resolve(make_project({"vault": "git@github.com:owner-b/artifacts.git"}))
+        self.assertEqual(a["name"], b["name"])
+        self.assertNotEqual(a["clone"], b["clone"])
+
+    def test_dot_paths_stay_inside_vaults_folder(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": "/tmp/plugin-data"}):
+            for v in ["/tmp/x/.", "/tmp/x/child/..", "/"]:
+                got = resolve.resolve(make_project({"vault": v}))
+                parent, leaf = os.path.split(got["clone"])
+                self.assertEqual(parent, "/tmp/plugin-data/vaults", v)
+                self.assertNotIn(leaf.split("-")[0], ("", ".", ".."), v)
 
     def test_repo_without_origin_uses_folder_name(self):
         root = make_project({"vault": VAULT}, origin=None)
