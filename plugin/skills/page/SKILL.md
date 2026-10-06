@@ -55,4 +55,4 @@ The capture hook skips any page that contains `vault:skip`, anywhere in the file
 
 ## 6. Publish
 
-Publish with the Artifact tool as usual, including `files` for supporting files. The capture hook reports "queued" (已排入書庫) afterwards; tell the user that the page is archived, or that it was skipped.
+Publish with the Artifact tool as usual, including `files` for supporting files. The capture hook then reports "queued" (已排入書庫): the page is saved locally and pushed to the library in the background. Tell the user it is queued, not that it is already in the library, or that it was skipped.

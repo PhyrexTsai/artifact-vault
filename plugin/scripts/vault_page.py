@@ -19,6 +19,7 @@ import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import capture  # noqa: E402
 import push  # noqa: E402
 import resolve  # noqa: E402
 
@@ -51,13 +52,25 @@ def vault_clone(cwd, env=os.environ):
     return found, clone
 
 
+def vault_file(clone, rel):
+    """Absolute path of a file inside the vault clone, or None. vault.json comes from the
+    remote, so a path that is absolute, climbs out, or links out must not be read: it would
+    embed a local file into a page that gets published."""
+    if not isinstance(rel, str) or not rel or os.path.isabs(rel):
+        return None
+    root = os.path.realpath(clone)
+    path = os.path.realpath(os.path.join(clone, rel))
+    if os.path.commonpath([root, path]) != root or not os.path.isfile(path):
+        return None
+    return path
+
+
 def load_types(clone):
     cfg = push.read_json(os.path.join(clone, "vault.json"), {})
     types = {}
     for name, t in (cfg.get("types") or {}).items():
-        template = os.path.join(clone, t.get("template", ""))
-        root = os.path.realpath(clone)
-        if not os.path.isfile(template) or os.path.commonpath([root, os.path.realpath(template)]) != root:
+        template = vault_file(clone, t.get("template"))
+        if not template:
             continue
         types[name] = {"label": t.get("label", name), "template": template,
                        "diagram": [d for d in t.get("diagram", []) if d in ("archify", "mermaid")]}
@@ -73,8 +86,20 @@ def prepare(cwd, env=os.environ, home=None):
     for t in types.values():
         t["use_diagram"] = next((d for d in t["diagram"] if d in tools), None)
     return {"vault": found["name"], "repo": found["repo"], "clone": clone, "types": types,
-            "diagram_tools": tools, "css": os.path.join(clone, cfg.get("css", "")),
-            "logo": os.path.join(clone, cfg.get("logo", ""))}
+            "diagram_tools": tools, "css": vault_file(clone, cfg.get("css")),
+            "logo": vault_file(clone, cfg.get("logo"))}
+
+
+def add_type(page, kind):
+    """Insert the vault:type tag inside <head>, or after a doctype, never before it."""
+    tag = f'<meta name="vault:type" content="{kind}">'
+    head = re.search(r"<head\b[^>]*>", page, re.I)
+    if head:
+        return page[:head.end()] + "\n" + tag + page[head.end():]
+    doctype = re.match(r"\s*<!doctype[^>]*>", page, re.I)
+    if doctype:
+        return page[:doctype.end()] + "\n" + tag + page[doctype.end():]
+    return tag + "\n" + page
 
 
 def render(kind, out, cwd, env=os.environ):
@@ -87,8 +112,8 @@ def render(kind, out, cwd, env=os.environ):
     read = lambda p: open(p).read() if p and os.path.isfile(p) else ""
     page = GUIDE.sub("", read(t["template"]), count=1)
     page = page.replace("/*@@BASE_CSS@@*/", read(info["css"])).replace("<!--@@LOGO@@-->", read(info["logo"]).strip())
-    if f'content="{kind}"' not in page:
-        page = f'<meta name="vault:type" content="{kind}">\n' + page
+    if capture.page_meta(page.encode()).get("vault:type", "").lower() != kind.lower():
+        page = add_type(page, kind)
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     with open(out, "w") as fh:
         fh.write(page)

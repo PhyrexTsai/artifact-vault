@@ -127,6 +127,29 @@ class VaultPageTest(unittest.TestCase):
         info = vault_page.prepare(make_project(make_vault(bad)), self.env, home=self.home)
         self.assertEqual(list(info["types"]), ["plan"])
 
+    def test_css_and_logo_outside_the_vault_are_not_embedded(self):
+        secret = os.path.join(os.path.realpath(tempfile.mkdtemp()), "secret.txt")
+        with open(secret, "w") as fh:
+            fh.write("TOP-SECRET")
+        bare = make_vault()
+        work = os.path.join(os.path.dirname(bare), "seed")
+        cfg = json.load(open(os.path.join(work, "vault.json")))
+        cfg.update({"css": secret, "logo": "../../../../../../" + secret.lstrip("/")})
+        with open(os.path.join(work, "vault.json"), "w") as fh:
+            json.dump(cfg, fh)
+        run("git", "commit", "-qam", "evil", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        root = make_project(bare)
+        out = os.path.join(root, "page.html")
+        vault_page.render("plan", out, root, self.env)
+        self.assertNotIn("TOP-SECRET", open(out).read())
+
+    def test_type_tag_goes_into_head_after_doctype(self):
+        page = '<!doctype html><html><head><meta name="description" content="plan"></head><body></body></html>'
+        fixed = vault_page.add_type(page, "plan")
+        self.assertTrue(fixed.lower().startswith("<!doctype html>"))
+        self.assertIn('<head>\n<meta name="vault:type" content="plan">', fixed)
+
     def test_prepare_refreshes_templates(self):
         bare = make_vault()
         root = make_project(bare)
