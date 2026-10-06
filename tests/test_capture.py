@@ -157,6 +157,8 @@ class CaptureTest(unittest.TestCase):
 
     def test_digest_distinguishes_operations(self):
         self.assertNotEqual(capture.digest(b"p", [], ["a.css"], []), capture.digest(b"p", [("-a.css", b"")], [], []))
+        self.assertNotEqual(capture.digest(b"p", [], [], [{"path": "x.js", "from_artifact": "A"}]),
+                            capture.digest(b"p", [], [], [{"path": "x.js", "from_artifact": "B"}]))
         self.assertNotEqual(capture.digest(b"p", [("a", b"x\0b")], [], []),
                             capture.digest(b"p", [("a", b"x"), ("b", b"")], [], []))
 
@@ -230,6 +232,10 @@ class CaptureTest(unittest.TestCase):
             self.assertNotIn(key, json.dumps(msg))
         self.assertEqual(self.spool_dirs(), [])
 
+    def test_entity_encoded_credential_blocks_capture(self):
+        root = make_project(files={"index.html": "<p>ghp&#95;" + "D" * 36 + "</p>\n"})
+        self.assertEqual(self.run_capture(publish_event(root, files={}))[0], "secret")
+
     def test_encrypted_private_key_blocks_capture(self):
         root = make_project(files={"index.html": PAGE, "k.pem": "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n"})
         self.assertEqual(self.run_capture(publish_event(root, files={"k.pem": "k.pem"}))[0], "secret")
@@ -272,7 +278,7 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(metas["1700000000-abcd"]["files_written"], ["diagrams/d.html"])
         self.assertEqual(metas["v2"]["files_written"], [])  # kept on the server, rebuilt by seq replay
         self.assertEqual(metas["v3"]["files_removed"], ["diagrams/d.html"])
-        self.assertEqual(metas["v3"]["files_remote"], ["x.js"])
+        self.assertEqual(metas["v3"]["files_remote"], [{"path": "x.js", "from_artifact": "a", "from_path": "x.js"}])
         self.assertEqual([metas[v]["seq"] for v in ("1700000000-abcd", "v2", "v3")], [1, 2, 3])
 
     def test_concurrent_publishes_each_keep_their_version(self):

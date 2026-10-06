@@ -109,8 +109,8 @@ def safe_published(path):
 def supporting_files(inp, cwd):
     """Yield (published_path, change, source_path) for tool_input.files.
 
-    change is "set" (local source), "remove" (null), "remote" (copied from another
-    artifact on the server, no local source), or "bad" (unsafe path).
+    change is "set" (source is a local path), "remove" (null), "remote" (copied from another
+    artifact on the server; source is {from_artifact, from_path, from_ver}), or "bad".
     """
     files = inp.get("files")
     base = cwd
@@ -130,7 +130,8 @@ def supporting_files(inp, cwd):
         elif src is None:
             yield clean, "remove", None
         elif isinstance(src, dict) and not isinstance(src.get("from"), str):
-            yield clean, "remote", None
+            ident = {f"from_{k}": src[k] for k in ("artifact", "path", "ver") if isinstance(src.get(k), str)}
+            yield clean, "remote", ident
         else:
             src = src["from"] if isinstance(src, dict) else src
             if not isinstance(src, str):
@@ -179,7 +180,8 @@ def digest(main, written, removed, remote):
     """Unambiguous content id: each entry is typed and its bytes are hashed separately."""
     sha = lambda b: hashlib.sha256(b).hexdigest()
     entries = [["page", sha(main)]] + [["write", p, sha(d)] for p, d in sorted(written)] \
-        + [["remove", p] for p in sorted(removed)] + [["remote", p] for p in sorted(remote)]
+        + [["remove", p] for p in sorted(removed)] \
+        + [["remote", r] for r in sorted(remote, key=lambda r: json.dumps(r, sort_keys=True))]
     return sha(json.dumps(entries, ensure_ascii=False).encode("utf-8"))
 
 
@@ -239,7 +241,7 @@ def capture(event, env=os.environ):
         elif change == "remove":
             removed.append(pub)
         elif change == "remote":
-            remote.append(pub)
+            remote.append({"path": pub, **src})
         else:
             try:
                 with open(src, "rb") as fh:
@@ -250,8 +252,11 @@ def capture(event, env=os.environ):
     problems += ["path conflict"] * clashes
 
     title = str(res.get("title") or art_id)
-    names = "\n".join([pub for pub, _ in written] + removed + remote).encode("utf-8")
-    kind = find_secret([main, title.encode("utf-8"), names] + [d for _, d in written])
+    names = "\n".join([pub for pub, _ in written] + removed + [json.dumps(r) for r in remote]).encode("utf-8")
+    blobs = [main, title.encode("utf-8"), names] + [d for _, d in written]
+    # Also check entity-decoded text, so &#95; and similar do not split a credential.
+    blobs += [html.unescape(b.decode("utf-8", "replace")).encode() for b in blobs if b"&" in b]
+    kind = find_secret(blobs)
     if kind:  # the title may itself hold the credential, so name the page by id only
         out(system=f"artifact-vault：artifact {art_id} 看起來含有 {kind}，沒有存進書庫。移除後重新發佈即可。",
             context=f"artifact-vault did not queue this page: it appears to contain a {kind}.")
@@ -278,7 +283,7 @@ def capture(event, env=os.environ):
         "type": page_type if TYPE_NAME.match(page_type) else "unsorted",
         "files_written": sorted(pub for pub, _ in written),
         "files_removed": sorted(removed),
-        "files_remote": sorted(remote),
+        "files_remote": sorted(remote, key=lambda r: r["path"]),
         "capabilities": sorted(caps.keys()) if isinstance(caps, dict) else [],
         "agent_type": event.get("agent_type"),
         "captured_at": now.isoformat(timespec="seconds"),
