@@ -3,15 +3,17 @@
   python3 vault_tag.py [--data <dir>] [--author <email>] list [dir]
   python3 vault_tag.py [--data <dir>] [--author <email>] set <id or artifact url> <type> [dir]
 
-Versions are never edited. A category change is written to overrides/<id>.json in the
-vault, committed through the same lock and checks as push (the commit may touch only that
-file), and pushed. The library site applies overrides when it builds its index.
+Versions are never edited. Each category change is a new file, overrides/<id>/<time>-<rand>.json,
+committed through the same lock and checks as push (the commit may touch only that file) and
+pushed. No file is ever shared between changes, so two machines tagging the same page never
+conflict; the newest change (by "at") wins. The library site applies it when it builds.
 """
 import datetime
 import json
 import os
 import re
 import sys
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import push  # noqa: E402
@@ -37,10 +39,18 @@ def artifacts(clone):
         if not metas:
             continue
         latest = max(metas, key=lambda m: (m.get("seq") or 0, m.get("captured_at") or ""))
-        override = push.read_json(os.path.join(clone, "overrides", f"{art}.json"), {})
+        override = latest_override(clone, art)
         found[art] = {"title": latest.get("title") or art, "type": override.get("type") or latest.get("type") or "unsorted",
                       "versions": len(metas), "latest": latest.get("version")}
     return found
+
+
+def latest_override(clone, art):
+    folder = os.path.join(clone, "overrides", art)
+    changes = [push.read_json(os.path.join(folder, n), None) for n in sorted(os.listdir(folder))] \
+        if os.path.isdir(folder) else []
+    changes = [c for c in changes if isinstance(c, dict) and c.get("type")]
+    return max(changes, key=lambda c: (c.get("at") or "", c.get("id") or "")) if changes else {}
 
 
 def parse_id(text):
@@ -64,11 +74,13 @@ def set_type(cwd, ref, kind, author, env=os.environ):
             raise TagError(f"{art} is not in the library yet (it may still be waiting to be pushed)")
         if arts[art]["type"] == kind:
             return f"{art} is already {kind}"
-        rel = f"overrides/{art}.json"
+        now = datetime.datetime.now(datetime.timezone.utc)
+        change = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
+        rel = f"overrides/{art}/{change}.json"
         path = os.path.join(clone, *rel.split("/"))
         push.inside_clone(clone, path)
-        push.write_json(path, {"type": kind, "by": author or None,
-                               "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")})
+        push.write_json(path, {"type": kind, "by": author or None, "id": change,
+                               "at": now.isoformat(timespec="microseconds")})
         before = push.head(clone)
         push.git("add", "-f", "--", rel, cwd=clone)
         push.git("commit", "--quiet", "-m", f"tag: {arts[art]['title']} as {kind}", cwd=clone)

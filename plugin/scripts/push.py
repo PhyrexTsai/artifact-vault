@@ -370,7 +370,11 @@ def push(clone):
     except RuntimeError:
         if not git("ls-remote", "--heads", "origin", cwd=clone).strip():
             raise  # empty vault that rejected the first push: nothing to rebase onto
-        git("pull", "--rebase", "--quiet", "origin", current_branch(clone), cwd=clone)  # someone pushed first
+        try:
+            git("pull", "--rebase", "--quiet", "origin", current_branch(clone), cwd=clone)  # someone pushed first
+        except RuntimeError:
+            subprocess.run(["git", *NO_HOOKS, "rebase", "--abort"], cwd=clone, capture_output=True)
+            raise  # never leave the clone mid-rebase; the commits stay and the next run retries
         git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
 
 

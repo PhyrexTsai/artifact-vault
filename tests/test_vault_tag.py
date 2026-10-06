@@ -63,7 +63,9 @@ class TagTest(unittest.TestCase):
         self.patch.stop()
 
     def remote_override(self):
-        return json.loads(run("git", "show", "main:overrides/Page1.json", cwd=self.bare))
+        names = [n for n in run("git", "ls-tree", "-r", "--name-only", "main", cwd=self.bare).split() if n.startswith("overrides/Page1/")]
+        changes = [json.loads(run("git", "show", f"main:{n}", cwd=self.bare)) for n in names]
+        return max(changes, key=lambda c: c["at"])
 
     def test_list_shows_archived_pages(self):
         rows = vault_tag.list_artifacts(self.root, self.env)
@@ -107,12 +109,25 @@ class TagTest(unittest.TestCase):
     def test_uncommitted_override_leftover_is_not_taken_as_done(self):
         vault_tag.list_artifacts(self.root, self.env)  # clone exists
         clone = os.path.join(self.data, "vaults", os.listdir(os.path.join(self.data, "vaults"))[0])
-        os.makedirs(os.path.join(clone, "overrides"), exist_ok=True)
-        with open(os.path.join(clone, "overrides", "Page1.json"), "w") as fh:
+        os.makedirs(os.path.join(clone, "overrides", "Page1"), exist_ok=True)
+        with open(os.path.join(clone, "overrides", "Page1", "x.json"), "w") as fh:
             json.dump({"type": "research"}, fh)  # as if killed before git add
         msg = vault_tag.set_type(self.root, "Page1", "research", "", self.env)
         self.assertIn("now research", msg)
         self.assertEqual(self.remote_override()["type"], "research")
+
+    def test_two_machines_tagging_one_page_do_not_conflict(self):
+        other = os.path.realpath(tempfile.mkdtemp())
+        env2 = {**self.env, "CLAUDE_PLUGIN_DATA": other}
+        vault_tag.list_artifacts(self.root, self.env)  # both machines have a clone
+        with mock.patch.dict(os.environ, env2):
+            vault_tag.list_artifacts(self.root, env2)
+            vault_tag.set_type(self.root, "Page1", "research", "", env2)
+        msg = vault_tag.set_type(self.root, "Page1", "unsorted", "", self.env)
+        self.assertIn("now unsorted", msg)
+        self.assertNotIn("later", msg)
+        self.assertEqual(self.remote_override()["type"], "unsorted")
+        self.assertEqual(vault_tag.list_artifacts(self.root, self.env)["Page1"]["type"], "unsorted")
 
     def test_cli_exit_codes(self):
         out = io.StringIO()
