@@ -319,6 +319,19 @@ class PushTest(unittest.TestCase):
         self.assertTrue(self.state()["ok"], self.state())
         self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
 
+    def test_configure_upgrades_an_older_attributes_rule(self):
+        clone = os.path.realpath(tempfile.mkdtemp())
+        run("git", "init", "-q", clone)
+        attrs = os.path.join(clone, ".git", "info", "attributes")
+        os.makedirs(os.path.dirname(attrs), exist_ok=True)
+        with open(attrs, "w") as fh:
+            fh.write("pages/** -text -filter -ident -working-tree-encoding\n")
+        push.configure(clone)
+        lines = [l.strip() for l in open(attrs).read().splitlines()]
+        self.assertIn("* -text -filter -ident -working-tree-encoding", lines)
+        push.configure(clone)  # idempotent
+        self.assertEqual(open(attrs).read().count("* -text"), 2)  # the old line plus one new line
+
     def test_lock_is_exclusive(self):
         path = os.path.join(self.data, "locks", "k.lock")
         with push.Lock(path) as a:

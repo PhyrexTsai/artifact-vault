@@ -154,7 +154,7 @@ def configure(clone):
     os.makedirs(os.path.dirname(attrs), exist_ok=True)
     rule = "* -text -filter -ident -working-tree-encoding\n"  # the whole private clone
     current = open(attrs).read() if os.path.exists(attrs) else ""
-    if rule not in current:
+    if rule.strip() not in (line.strip() for line in current.splitlines()):  # whole lines: old rules are prefixes
         with open(attrs, "a") as fh:
             fh.write(rule)
 
