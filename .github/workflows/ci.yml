@@ -32,9 +32,12 @@ jobs:
   leak-scan:
     runs-on: ubuntu-latest
     steps:
+      # On a PR, scan the PR's own commits. GitHub's temporary merge commit is not pushed
+      # anywhere; the push to main scans the real merge result.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
