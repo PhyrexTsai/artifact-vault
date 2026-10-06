@@ -315,6 +315,32 @@ class PushTest(unittest.TestCase):
         self.assertIn("pages/ExAmPlEiD123/v2/index.html", files)
         self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
 
+    def test_interrupted_cleanup_cannot_overwrite_an_archive(self):
+        bare = make_vault()
+        root = make_project(bare)
+        publish(root, self.env)
+        [(meta, folder)] = self.spooled()
+        with mock.patch.object(push.shutil, "rmtree", side_effect=lambda p, ignore_errors=False: os.remove(os.path.join(p, "index.html")) if os.path.exists(os.path.join(p, "index.html")) else None):
+            push.main(self.env)
+        push.main(self.env)
+        self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
+        self.assertEqual(self.spooled(), [])
+
+    def test_failed_first_commit_can_be_retried(self):
+        bare = make_vault(empty=True)
+        hooks = os.path.realpath(tempfile.mkdtemp())
+        with open(os.path.join(hooks, "pre-commit"), "w") as fh:
+            fh.write("#!/bin/sh\nfor f in $(git diff --cached --name-only); do echo x > \"$f\"; done\nexit 1\n")
+        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
+        publish(make_project(bare), self.env)
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                                          "GIT_CONFIG_VALUE_0": hooks}):
+            push.main(self.env)
+        self.assertFalse(self.state()["ok"])
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
+
     def test_hook_rewrite_left_unstaged_is_not_pushed_later(self):
         bare = make_vault()
         hooks = os.path.realpath(tempfile.mkdtemp())

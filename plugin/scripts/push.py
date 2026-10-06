@@ -97,6 +97,9 @@ def queued_versions(spool):
             continue
         for ver in sorted(os.listdir(art_dir)):
             folder = os.path.join(art_dir, ver)
+            if ".done" in ver and os.path.isdir(folder):
+                shutil.rmtree(folder, ignore_errors=True)  # a retire() that was interrupted
+                continue
             meta = read_json(os.path.join(folder, "meta.json"), None)
             if not isinstance(meta, dict) or meta.get("id") != art or meta.get("version") != ver:
                 continue  # a temp folder of a running capture, or not a version at all
@@ -154,6 +157,14 @@ def commit_pages(clone, subject):
         git("commit", "--quiet", "-m", subject, cwd=clone)
 
 
+def retire(folder):
+    """Leave the queue atomically, then delete. A rename is all-or-nothing, so an interrupted
+    delete can never leave a partial folder that still looks like a complete version."""
+    gone = f"{folder}.done{os.getpid()}"
+    os.replace(folder, gone)
+    shutil.rmtree(gone, ignore_errors=True)
+
+
 def blob_id(path, algo="sha1"):
     """Git's id for a file's bytes, computed without asking git, so no file name is ever
     parsed by a git command. algo follows the repo's object format (sha1 or sha256)."""
@@ -192,7 +203,7 @@ def recover(clone):
     if has_head and git("ls-tree", "HEAD", "--", "pages", cwd=clone).strip():
         git("restore", "-q", "--source=HEAD", "--staged", "--worktree", "--", "pages", cwd=clone)
     else:
-        git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", "pages", cwd=clone)
+        git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", "pages", cwd=clone)
     git("clean", "-q", "-f", "-d", "-x", "--", "pages", cwd=clone)
 
 
@@ -230,7 +241,7 @@ def push_vault(data_dir, key):
             if bad:
                 raise RuntimeError(f"{len(bad)} archived file(s) missing or changed in the commit; spool kept")
         for _, folder in queued:  # only now: the commit holds their content
-            shutil.rmtree(folder, ignore_errors=True)
+            retire(folder)
         ahead = commits_to_push(clone)
         if ahead:
             push(clone)
