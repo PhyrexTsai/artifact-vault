@@ -183,6 +183,8 @@ class PushTest(unittest.TestCase):
             capture.capture(event, env=self.env)
         push.main(self.env)
         self.assertTrue(self.state()["ok"], self.state())
+        tree = set(run("git", "ls-tree", "-r", "-z", "--name-only", "main", cwd=bare).split("\0"))
+        self.assertIn(f"pages/Nfd1/v1/{name}", tree)  # exact spelling the page references
 
     def test_lock_is_exclusive(self):
         path = os.path.join(self.data, "locks", "k.lock")

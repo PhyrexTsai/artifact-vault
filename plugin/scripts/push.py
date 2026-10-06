@@ -23,7 +23,6 @@ import os
 import shutil
 import subprocess
 import sys
-import unicodedata
 
 GIT_TIMEOUT = 120
 CLONE_TIMEOUT = 300
@@ -121,6 +120,12 @@ def ensure_clone(url, clone):
     os.replace(tmp, clone)
 
 
+def configure(clone):
+    # Store file names byte for byte. macOS git otherwise precomposes Unicode names, and the
+    # archived HTML and meta.json would reference a spelling the commit does not have.
+    git("config", "core.precomposeunicode", "false", cwd=clone)
+
+
 def current_branch(clone):
     return git("symbolic-ref", "--short", "HEAD", cwd=clone).strip()
 
@@ -165,6 +170,7 @@ def push_vault(data_dir, key):
         if os.path.isdir(os.path.join(clone, ".git")):
             recover(clone)
         ensure_clone(url, clone)
+        configure(clone)
         queued = queued_versions(spool)
         expected, titles = [], []
         for meta, folder in queued:
@@ -173,9 +179,8 @@ def push_vault(data_dir, key):
         if expected:
             commit_pages(clone, f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles)} versions")
             # -z: git would otherwise quote and escape non-ASCII paths such as Chinese file names
-            nfc = lambda p: unicodedata.normalize("NFC", p)  # macOS git may precompose names
-            tracked = {nfc(p) for p in git("ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "pages", cwd=clone).split("\0")}
-            missing = [p for p in expected if nfc(p) not in tracked]
+            tracked = set(git("ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "pages", cwd=clone).split("\0"))
+            missing = [p for p in expected if p not in tracked]
             if missing:
                 raise RuntimeError(f"{len(missing)} archived file(s) missing from the commit; spool kept")
         for _, folder in queued:  # only now: the commit holds their content
