@@ -28,6 +28,17 @@ def make_repo(files, email=NOREPLY, message="init"):
     return root
 
 
+def commit(root, files, email=NOREPLY, message="next", remove=()):
+    for path in remove:
+        os.remove(os.path.join(root, path))
+    for path, text in files.items():
+        with open(os.path.join(root, path), "w") as fh:
+            fh.write(text)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": email, "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": email}
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=root, check=True, capture_output=True, env={**os.environ, **env})
+
+
 def scan(root, patterns=SECRET, ci="false"):
     out = io.StringIO()
     with mock.patch.dict(os.environ, {"LEAK_PATTERNS": patterns, "CI": ci}), redirect_stdout(out):
@@ -62,6 +73,24 @@ class LeakScanTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("not a GitHub noreply address", out)
         self.assertNotIn("someone@example.com", out)
+
+    def test_secret_added_then_deleted_still_fails(self):
+        root = make_repo({"a.txt": f"oops {SECRET}\n"})
+        commit(root, {"a.txt": "clean now\n"})
+        code, out = scan(root)
+        self.assertEqual(code, 1)
+        self.assertIn("history", out)
+        self.assertNotIn(SECRET, out.lower())
+
+    def test_secret_in_file_name_is_redacted(self):
+        code, out = scan(make_repo({"ACME-Secret-Project.md": "nothing here\n"}))
+        self.assertEqual(code, 1)
+        self.assertIn("<redacted path>", out)
+        self.assertNotIn(SECRET, out.lower())
+
+    def test_legacy_noreply_without_id_passes(self):
+        code, out = scan(make_repo({"a.txt": "x\n"}, email="tester@users.noreply.github.com"))
+        self.assertEqual(code, 0, out)
 
     def test_ci_without_patterns_fails_closed(self):
         root = make_repo({"a.txt": "x\n"})
