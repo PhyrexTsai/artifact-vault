@@ -65,8 +65,12 @@ def vault_files(bare):
     return set(run("git", "ls-tree", "-r", "--name-only", "main", cwd=bare).split())
 
 
-def vault_meta(bare, art="ExAmPlEiD123"):
-    return json.loads(run("git", "show", f"main:meta/{art}.json", cwd=bare))
+def version_meta(bare, art, version):
+    return json.loads(run("git", "show", f"main:pages/{art}/{version}/meta.json", cwd=bare))
+
+
+def versions(bare, art="ExAmPlEiD123"):
+    return sorted({p.split("/")[2] for p in vault_files(bare) if p.startswith(f"pages/{art}/")})
 
 
 class PushTest(unittest.TestCase):
@@ -94,10 +98,8 @@ class PushTest(unittest.TestCase):
         push.main(self.env)
         files = vault_files(bare)
         self.assertIn("pages/ExAmPlEiD123/v1/index.html", files)
-        self.assertIn("meta/ExAmPlEiD123.json", files)
-        meta = vault_meta(bare)
-        self.assertEqual(meta["title"], "Example")
-        self.assertEqual([v["version"] for v in meta["versions"]], ["v1"])
+        self.assertEqual(version_meta(bare, "ExAmPlEiD123", "v1")["title"], "Example")
+        self.assertFalse(any(p.startswith("meta/") for p in files))  # summaries are built by the site
         self.assertEqual(self.spooled(), [])
         self.assertTrue(self.state()["ok"])
 
@@ -107,26 +109,65 @@ class PushTest(unittest.TestCase):
         push.main(self.env)
         self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
 
-    def test_duplicate_of_previous_seq_is_dropped(self):
+    def test_every_version_is_kept_even_duplicates(self):
         bare = make_vault()
         root = make_project(bare)
         publish(root, self.env, version="v1", seq=1)
-        publish(root, self.env, version="v2", seq=2)  # same content
-        publish(root, self.env, version="v3", seq=3, body="<p>changed</p>\n")
+        publish(root, self.env, version="v3", seq=3)
+        publish(root, self.env, version="v2", seq=2, body="<p>changed</p>\n")
         push.main(self.env)
-        self.assertEqual([v["version"] for v in vault_meta(bare)["versions"]], ["v3", "v1"])
-        self.assertEqual(self.state()["duplicates"], 1)
+        self.assertEqual(versions(bare), ["v1", "v2", "v3"])
+        self.assertEqual(version_meta(bare, "ExAmPlEiD123", "v1")["digest"],
+                         version_meta(bare, "ExAmPlEiD123", "v3")["digest"])
 
-    def test_out_of_order_versions_sorted_and_latest_wins(self):
+    def test_two_machines_archiving_one_artifact_do_not_conflict(self):
         bare = make_vault()
         root = make_project(bare)
-        publish(root, self.env, version="v2", seq=2, body="<p>two</p>\n", title="Two")
+        other = os.path.realpath(tempfile.mkdtemp())
+        other_env = {**self.env, "CLAUDE_PLUGIN_DATA": other}
+        publish(root, self.env, version="v1", seq=1)
+        publish(root, other_env, version="v2", seq=2, body="<p>other</p>\n")
+        push.main(other_env)
         push.main(self.env)
-        publish(root, self.env, version="v1", seq=1, body="<p>one</p>\n", title="One")
+        self.assertTrue(self.state()["ok"])
+        self.assertEqual(versions(bare), ["v1", "v2"])
+
+    def test_gitignore_in_vault_cannot_drop_archived_files(self):
+        bare = make_vault()
+        work = os.path.join(os.path.dirname(bare), "seed")
+        with open(os.path.join(work, ".gitignore"), "w") as fh:
+            fh.write("*.png\n")
+        run("git", "add", "-A", cwd=work); run("git", "commit", "-qm", "ignore png", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        root = make_project(bare)
+        with open(os.path.join(root, "logo.png"), "wb") as fh:
+            fh.write(b"\x89PNG")
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write("<img src=logo.png>\n")
+        event = {"tool_name": "Artifact", "cwd": root,
+                 "tool_input": {"file_path": os.path.join(root, "index.html"), "files": {"logo.png": "logo.png"}},
+                 "tool_response": {"url": ARTIFACT + "Img1", "title": "Img", "version": "v1", "seq": 1}}
+        with redirect_stdout(io.StringIO()):
+            capture.capture(event, env=self.env)
         push.main(self.env)
-        meta = vault_meta(bare)
-        self.assertEqual([v["version"] for v in meta["versions"]], ["v2", "v1"])
-        self.assertEqual(meta["title"], "Two")
+        self.assertIn("pages/Img1/v1/logo.png", vault_files(bare))
+
+    def test_failed_commit_is_recovered_before_pull(self):
+        bare = make_vault()
+        root = make_project(bare)
+        publish(root, self.env)
+        push.main(self.env)
+        clone = os.path.join(self.data, "vaults", os.listdir(os.path.join(self.data, "vaults"))[0])
+        os.makedirs(os.path.join(clone, "pages", "Left", "v1"))
+        with open(os.path.join(clone, "pages", "Left", "v1", "index.html"), "w") as fh:
+            fh.write("left behind\n")
+        run("git", "add", "-A", cwd=clone)  # staged but never committed
+        publish(root, self.env, version="v2", seq=2, body="<p>two</p>\n")
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        files = vault_files(bare)
+        self.assertIn("pages/Left/v1/index.html", files)
+        self.assertIn("pages/ExAmPlEiD123/v2/index.html", files)
 
     def test_unreachable_vault_keeps_spool_and_records_error(self):
         root = make_project("/nonexistent/vault.git")

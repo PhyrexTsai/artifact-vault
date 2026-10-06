@@ -5,10 +5,14 @@ For every vault in ${CLAUDE_PLUGIN_DATA}/spool/<key>/:
      turn tries again.
   2. Clone the vault the first time, or `pull --rebase` an existing clone. Git never prompts
      (GIT_TERMINAL_PROMPT=0, ssh BatchMode), so bad credentials fail instead of hanging.
-  3. Apply versions in seq order into pages/<id>/<version>/ and update meta/<id>.json.
-     A version whose digest equals the previous version (by seq) is dropped as a duplicate.
-  4. Commit pages/ and meta/ only, delete the applied spool folders, and push. A failed push
-     leaves the commit in the clone; the next run pushes it.
+  3. Copy each version into pages/<id>/<version>/ (its meta.json included). Push never
+     edits a shared file: every version has its own path, so pushes from several machines
+     rebase without conflicts. The per-artifact summary and duplicate hiding (same digest
+     as the previous seq) happen when the site is built. Git stores identical content once,
+     so a duplicate version costs almost nothing.
+  4. Commit pages/ (forced past .gitignore), check that every file landed in the commit,
+     then delete those spool folders and push. A failed push stays committed in the clone
+     and is pushed by the next run.
 
 Writes the outcome to state/<key>-push.json for the setup skill and appends to logs/push.log.
 Never fails the session: errors are recorded and the hook exits 0.
@@ -122,34 +126,24 @@ def ensure_clone(url, clone):
     os.replace(tmp, clone)
 
 
-ARTIFACT_KEYS = ("id", "url", "title", "type", "repo", "author", "audience", "capabilities")
-VERSION_KEYS = ("version", "seq", "captured_at", "digest", "title", "type", "files_written",
-                "files_removed", "files_remote", "files_incomplete", "agent_type")
-
-
 def apply_version(clone, meta, folder):
-    """Copy one version into the clone. Return False when it duplicates the previous seq."""
-    art = meta["id"]
-    meta_path = os.path.join(clone, "meta", f"{art}.json")
-    record = read_json(meta_path, {"id": art, "versions": []})
-    versions = record.get("versions", [])
-    if any(v.get("version") == meta["version"] for v in versions):
-        return False  # already archived (a retried run)
-    earlier = [v for v in versions if (v.get("seq") or 0) < (meta.get("seq") or 0)]
-    if earlier and max(earlier, key=lambda v: v.get("seq") or 0).get("digest") == meta.get("digest"):
-        return False  # same content as the version just before it
-    dest = os.path.join(clone, "pages", art, meta["version"])
+    """Copy one version into pages/<id>/<version>/. Return the paths it should commit."""
+    rel = os.path.join("pages", meta["id"], meta["version"])
+    dest = os.path.join(clone, rel)
     shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(folder, dest)
-    versions.append({k: meta.get(k) for k in VERSION_KEYS if k in meta})
-    versions.sort(key=lambda v: (v.get("seq") or 0, v.get("captured_at") or ""), reverse=True)
-    latest = versions[0]["version"] == meta["version"]
-    for k in ARTIFACT_KEYS:
-        if latest or k not in record:
-            record[k] = meta.get(k)
-    record["versions"] = versions
-    write_json(meta_path, record)
-    return True
+    paths = []
+    for d, _, names in os.walk(dest):
+        for n in names:
+            paths.append(os.path.relpath(os.path.join(d, n), clone).replace(os.sep, "/"))
+    return paths
+
+
+def recover(clone):
+    """Commit pages/ changes a crashed or failed earlier run left in the clone."""
+    if git("status", "--porcelain", "--", "pages", cwd=clone).strip():
+        git("add", "-f", "--", "pages", cwd=clone)
+        git("commit", "--quiet", "-m", "archive: recovered versions", cwd=clone)
 
 
 def push_vault(data_dir, key):
@@ -162,26 +156,29 @@ def push_vault(data_dir, key):
     with Lock(os.path.join(data_dir, "locks", f"{key}.lock")) as lock:
         if not lock.held:
             return {"skipped": "another session is pushing"}
+        if os.path.isdir(os.path.join(clone, ".git")):
+            recover(clone)
         ensure_clone(url, clone)
-        applied, dropped, titles, done = 0, 0, [], []
-        for meta, folder in queued_versions(spool):
-            if apply_version(clone, meta, folder):
-                applied += 1
-                titles.append(meta.get("title") or meta["id"])
-            else:
-                dropped += 1
-            done.append(folder)
-        # Commit whatever is in pages/ and meta/, including changes a failed earlier run left.
-        if git("status", "--porcelain", "--", "pages", "meta", cwd=clone).strip():
-            git("add", "--", "pages", "meta", cwd=clone)
-            subject = f"archive: {titles[0]}" if applied == 1 else f"archive: {max(applied, 1)} versions"
+        queued = queued_versions(spool)
+        expected, titles = [], []
+        for meta, folder in queued:
+            expected += apply_version(clone, meta, folder)
+            titles.append(meta.get("title") or meta["id"])
+        if git("status", "--porcelain", "--", "pages", cwd=clone).strip():
+            git("add", "-f", "--", "pages", cwd=clone)  # -f: a .gitignore must not drop archived files
+            subject = f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles) or 'recovered'} versions"
             git("commit", "--quiet", "-m", subject, cwd=clone)
-        for folder in done:  # only after the commit: the clone now holds their content
+        if expected:
+            tracked = set(git("ls-tree", "-r", "--name-only", "HEAD", "--", "pages", cwd=clone).split("\n"))
+            missing = [p for p in expected if p not in tracked]
+            if missing:
+                raise RuntimeError(f"{len(missing)} archived file(s) missing from the commit; spool kept")
+        for _, folder in queued:  # only now: the commit holds their content
             shutil.rmtree(folder, ignore_errors=True)
         ahead = commits_to_push(clone)
         if ahead:
             push(clone)
-        return {"applied": applied, "duplicates": dropped, "pushed": ahead}
+        return {"applied": len(queued), "pushed": ahead}
 
 
 def commits_to_push(clone):

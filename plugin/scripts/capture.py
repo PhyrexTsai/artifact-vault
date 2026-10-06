@@ -6,7 +6,8 @@ version meta file. It never clones, commits, or uses the network; push.sh does t
 Skips quietly when: the call is not a publish (quickstart, read, list, ...), it uploads an
 asset, it has no file_path, the project has no vault, or the page contains the token
 vault:skip anywhere (fail closed: a page that only shows the token is skipped too). Skips with a message when the page looks like it contains a
-credential. Every other publish is kept; duplicates are dropped at push time, in seq order.
+credential. Every other publish is kept; the site hides a version identical to the one
+before it (by seq), and git stores identical content once.
 
 Never fails the session: unexpected errors go to stderr and the hook exits 0.
 """
@@ -262,8 +263,8 @@ def capture(event, env=os.environ):
             context=f"artifact-vault did not queue this page: it appears to contain a {kind}.")
         return "secret"
 
-    # Every publish is kept. Skipping duplicates needs the versions in seq order, which only
-    # push time has, so the digest is recorded here and compared there.
+    # Every publish is kept. Hiding duplicates needs all versions in seq order, which only the
+    # site has, so the digest is recorded here and compared there.
     dig = digest(main, written, removed, remote)
 
     now = datetime.datetime.now(datetime.timezone.utc)
