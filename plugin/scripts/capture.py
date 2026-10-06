@@ -17,7 +17,6 @@ import os
 import re
 import shutil
 import sys
-import time
 from html.parser import HTMLParser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -118,76 +117,6 @@ def supporting_files(inp, cwd):
                 yield clean, "set", os.path.normpath(src if os.path.isabs(src) else os.path.join(base, src))
 
 
-def load_mirror(folder):
-    """Supporting files of the last captured version: {published_path: bytes}."""
-    found = {}
-    for d, _, names in os.walk(folder):
-        for n in names:
-            full = os.path.join(d, n)
-            with open(full, "rb") as fh:
-                found[os.path.relpath(full, folder).replace(os.sep, "/")] = fh.read()
-    return found
-
-
-def save_mirror(folder, extras):
-    tmp = f"{folder}.tmp{os.getpid()}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    os.makedirs(tmp)
-    for pub, data in extras:
-        dest = os.path.join(tmp, *pub.split("/"))
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with open(dest, "wb") as fh:
-            fh.write(data)
-    shutil.rmtree(folder, ignore_errors=True)
-    os.replace(tmp, folder)
-
-
-class ArtifactLock:
-    """Cross-process lock for one artifact's state (mkdir is atomic; macOS has no flock)."""
-
-    def __init__(self, path, wait=3.0, stale=60.0):
-        self.path, self.wait, self.stale = path, wait, stale
-
-    def __enter__(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        deadline = time.monotonic() + self.wait
-        while True:
-            try:
-                os.mkdir(self.path)
-                return self
-            except FileExistsError:
-                try:
-                    if time.time() - os.path.getmtime(self.path) > self.stale:
-                        os.rmdir(self.path)  # left behind by a crashed hook
-                        continue
-                except OSError:
-                    continue
-                if time.monotonic() > deadline:
-                    raise TimeoutError("another session is capturing this artifact")
-                time.sleep(0.05)
-
-    def __exit__(self, *exc):
-        try:
-            os.rmdir(self.path)
-        except OSError:
-            pass
-
-
-def mark_stale(state_dir):
-    """The server now holds files this plugin did not see; stop carrying old copies forward."""
-    shutil.rmtree(os.path.join(state_dir, "files"), ignore_errors=True)
-    path = os.path.join(state_dir, "state.json")
-    try:
-        with open(path) as fh:
-            state = json.load(fh)
-    except (OSError, ValueError):
-        state = {}
-    state.update({"stale": True, "digest": None})
-    os.makedirs(state_dir, exist_ok=True)
-    with open(path, "w") as fh:
-        json.dump(state, fh)
-
-
 def drop_conflicts(extras):
     """Keep files that can all be written into one folder next to index.html and meta.json.
 
@@ -261,61 +190,48 @@ def capture(event, env=os.environ):
         print("artifact-vault: CLAUDE_PLUGIN_DATA is not set; nothing queued", file=sys.stderr)
         return None
 
-    state_dir = os.path.join(data_dir, "state", found["key"], art_id)
-    try:
-        with ArtifactLock(state_dir + ".lock"):
-            return capture_page(event, inp, res, cwd, found, data_dir, art_id, state_dir, env)
-    except TimeoutError as e:
-        out(system=f"artifact-vault：artifact {art_id} 沒有排入書庫（{e}）。重新發佈一次即可。")
-        return "busy"
-
-
-def capture_page(event, inp, res, cwd, found, data_dir, art_id, state_dir, env):
     main_path = inp["file_path"]
     with open(main_path if os.path.isabs(main_path) else os.path.join(cwd, main_path), "rb") as fh:
         main = fh.read()
     metas = page_meta(main)
     if "vault:skip" in metas:
-        mark_stale(state_dir)
         return None
 
-    # A republish keeps every supporting file it does not list, so start from the files of
-    # the last captured version and apply this publish's changes.
-    state_path = os.path.join(state_dir, "state.json")
+    # Store only what this publish changed. A republish keeps the files it does not list,
+    # so the full file set of a version is rebuilt later by replaying versions in seq order
+    # (written files replace, removed files drop). That keeps capture free of shared state.
+    written, removed, remote, problems = [], [], [], []
+    for pub, change, src in supporting_files(inp, cwd):
+        if change == "bad":
+            problems.append("unsafe published path")
+        elif change == "remove":
+            removed.append(pub)
+        elif change == "remote":
+            remote.append(pub)
+        else:
+            try:
+                with open(src, "rb") as fh:
+                    written.append((pub, fh.read()))
+            except OSError:
+                problems.append(f"missing source for {pub}")
+    written, clashes = drop_conflicts(sorted(written))  # sorted: clashes resolve the same way every time
+    problems += ["path conflict"] * clashes
+
+    title = str(res.get("title") or art_id)
+    names = "\n".join(pub for pub, _ in written).encode("utf-8")
+    kind = find_secret([main, title.encode("utf-8"), names] + [d for _, d in written])
+    if kind:  # the title may itself hold the credential, so name the page by id only
+        out(system=f"artifact-vault：artifact {art_id} 看起來含有 {kind}，沒有存進書庫。移除後重新發佈即可。",
+            context=f"artifact-vault did not queue this page: it appears to contain a {kind}.")
+        return "secret"
+
+    dig = digest(main, written + [(f"-{r}", b"") for r in sorted(removed)])
+    state_path = os.path.join(data_dir, "state", found["key"], f"{art_id}.json")
     try:
         with open(state_path) as fh:
             state = json.load(fh)
     except (OSError, ValueError):
         state = {}
-    current, problems = load_mirror(os.path.join(state_dir, "files")), []
-    lowered = {k.lower(): k for k in current}
-    for pub, change, src in supporting_files(inp, cwd):
-        if change == "bad":
-            problems.append("unsafe published path")
-            continue
-        current.pop(lowered.pop(pub.lower(), pub), None)
-        if change == "set":
-            try:
-                with open(src, "rb") as fh:
-                    current[pub] = fh.read()
-                lowered[pub.lower()] = pub
-            except OSError:
-                problems.append(f"missing source for {pub}")
-        elif change == "remote":
-            problems.append(f"no local copy of {pub}")
-
-    extras, clashes = drop_conflicts(sorted(current.items()))
-    problems += ["path conflict"] * clashes
-    title = str(res.get("title") or art_id)
-    names = "\n".join(pub for pub, _ in extras).encode("utf-8")
-    kind = find_secret([main, title.encode("utf-8"), names] + [d for _, d in extras])
-    if kind:  # the title may itself hold the credential, so name the page by id only
-        mark_stale(state_dir)
-        out(system=f"artifact-vault：artifact {art_id} 看起來含有 {kind}，沒有存進書庫。移除後重新發佈即可。",
-            context=f"artifact-vault did not queue this page: it appears to contain a {kind}.")
-        return "secret"
-
-    dig = digest(main, extras)
     if state.get("digest") == dig:
         out(system=f"artifact-vault：「{title}」內容沒有變，書庫不重存。")
         return "unchanged"
@@ -335,22 +251,20 @@ def capture_page(event, inp, res, cwd, found, data_dir, art_id, state_dir, env):
         "author": env.get("CLAUDE_PLUGIN_OPTION_AUTHOR_EMAIL") or None,
         "repo": found["repo"],
         "type": page_type if TYPE_NAME.match(page_type) else "unsorted",
-        "files": sorted(pub for pub, _ in extras),
+        "files_written": sorted(pub for pub, _ in written),
+        "files_removed": sorted(removed),
+        "files_remote": sorted(remote),
         "capabilities": sorted(caps.keys()) if isinstance(caps, dict) else [],
         "agent_type": event.get("agent_type"),
         "captured_at": now.isoformat(timespec="seconds"),
         "digest": dig,
-        "files_incomplete": bool(state.get("stale")),
     }
-    write_version(os.path.join(data_dir, "spool", found["key"], art_id, version), main, extras, meta)
-    os.makedirs(state_dir, exist_ok=True)
-    save_mirror(os.path.join(state_dir, "files"), extras)
+    write_version(os.path.join(data_dir, "spool", found["key"], art_id, version), main, written, meta)
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
     with open(state_path, "w") as fh:
         json.dump({"digest": dig, "version": version}, fh)
 
     note = f"（略過 {len(problems)} 個子檔案）" if problems else ""
-    if meta["files_incomplete"]:
-        note += "（上一版沒有存進書庫，這一版只含本次列出的子檔案）"
     out(system=f"artifact-vault：已排入書庫 {found['name']}：「{title}」{note}",
         context=f"artifact-vault queued \"{title}\" ({art_id}, version {version}, type {meta['type']}) "
                 f"for library {found['name']}. It is pushed in the background.")

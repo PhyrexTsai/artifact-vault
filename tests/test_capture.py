@@ -101,7 +101,7 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(meta["type"], "dev-plan")
         self.assertEqual(meta["audience"], "owner")
         self.assertEqual(meta["author"], "author@example.com")
-        self.assertEqual(meta["files"], ["diagrams/d.html"])
+        self.assertEqual(meta["files_written"], ["diagrams/d.html"])
         self.assertEqual(meta["seq"], 1)
 
     def test_vault_skip_is_skipped(self):
@@ -148,7 +148,7 @@ class CaptureTest(unittest.TestCase):
         self.assertIn("略過 4", msg["systemMessage"])
         [spool] = self.spool_dirs()
         with open(os.path.join(spool, "meta.json")) as fh:
-            self.assertEqual(json.load(fh)["files"], ["ok/d.html"])
+            self.assertEqual(json.load(fh)["files_written"], ["ok/d.html"])
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(spool), "escape.html")))
 
     def test_case_variants_of_reserved_and_duplicate_paths_are_dropped(self):
@@ -161,7 +161,7 @@ class CaptureTest(unittest.TestCase):
         with open(os.path.join(spool, "index.html")) as fh:
             self.assertEqual(fh.read(), PAGE)
         with open(os.path.join(spool, "meta.json")) as fh:
-            self.assertEqual(len(json.load(fh)["files"]), 1)
+            self.assertEqual(len(json.load(fh)["files_written"]), 1)
 
     def test_file_folder_conflicts_drop_only_the_clashing_file(self):
         root = make_project()
@@ -173,7 +173,7 @@ class CaptureTest(unittest.TestCase):
         [spool] = self.spool_dirs()
         with open(os.path.join(spool, "meta.json")) as fh:
             # sorted order decides which side of a clash is kept; the result is deterministic
-            self.assertEqual(json.load(fh)["files"], ["Deep", "assets"])
+            self.assertEqual(json.load(fh)["files_written"], ["Deep", "assets"])
         self.assertIn("略過 4", msg["systemMessage"])
 
     def test_credential_in_file_name_blocks_capture(self):
@@ -200,68 +200,46 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(self.run_capture(publish_event(root, version=None))[0], "queued")
         self.assertEqual(len(self.spool_dirs()), 2)
 
-    def test_republish_keeps_unlisted_files_and_applies_removals(self):
+    def test_republish_records_only_its_own_changes(self):
         root = make_project()
         self.assertEqual(self.run_capture(publish_event(root))[0], "queued")
         with open(os.path.join(root, "index.html"), "w") as fh:
             fh.write(PAGE + "<p>v2</p>\n")
         self.assertEqual(self.run_capture(publish_event(root, files={}, version="v2", seq=2))[0], "queued")
-        v2 = [d for d in self.spool_dirs() if d.endswith("v2")][0]
-        self.assertTrue(os.path.isfile(os.path.join(v2, "diagrams", "d.html")))
-        with open(os.path.join(root, "index.html"), "w") as fh:
-            fh.write(PAGE + "<p>v3</p>\n")
-        self.run_capture(publish_event(root, files={"diagrams/d.html": None}, version="v3", seq=3))
-        v3 = [d for d in self.spool_dirs() if d.endswith("v3")][0]
-        self.assertFalse(os.path.exists(os.path.join(v3, "diagrams", "d.html")))
-        with open(os.path.join(v3, "meta.json")) as fh:
-            self.assertEqual(json.load(fh)["files"], [])
+        self.run_capture(publish_event(root, files={"diagrams/d.html": None, "x.js": {"artifact": "a", "path": "x.js"}},
+                                       version="v3", seq=3))
+        metas = {}
+        for d in self.spool_dirs():
+            with open(os.path.join(d, "meta.json")) as fh:
+                m = json.load(fh)
+            metas[m["version"]] = m
+        self.assertEqual(metas["1700000000-abcd"]["files_written"], ["diagrams/d.html"])
+        self.assertEqual(metas["v2"]["files_written"], [])  # kept on the server, rebuilt by seq replay
+        self.assertEqual(metas["v3"]["files_removed"], ["diagrams/d.html"])
+        self.assertEqual(metas["v3"]["files_remote"], ["x.js"])
+        self.assertEqual([metas[v]["seq"] for v in ("1700000000-abcd", "v2", "v3")], [1, 2, 3])
 
-    def test_skipped_version_marks_carried_files_incomplete(self):
-        root = make_project()
-        self.assertEqual(self.run_capture(publish_event(root))[0], "queued")
-        with open(os.path.join(root, "index.html"), "w") as fh:
-            fh.write('<meta name="vault:skip">\n')
-        self.assertIsNone(self.run_capture(publish_event(root, version="v2"))[0])
-        with open(os.path.join(root, "index.html"), "w") as fh:
-            fh.write(PAGE + "<p>v3</p>\n")
-        result, msg = self.run_capture(publish_event(root, files={}, version="v3"))
-        self.assertEqual(result, "queued")
-        v3 = [d for d in self.spool_dirs() if d.endswith("v3")][0]
-        with open(os.path.join(v3, "meta.json")) as fh:
-            meta = json.load(fh)
-        self.assertEqual(meta["files"], [])
-        self.assertTrue(meta["files_incomplete"])
-        self.assertIn("只含本次列出", msg["systemMessage"])
-        with open(os.path.join(root, "index.html"), "w") as fh:
-            fh.write(PAGE + "<p>v4</p>\n")
-        self.run_capture(publish_event(root, version="v4"))
-        v4 = [d for d in self.spool_dirs() if d.endswith("v4")][0]
-        with open(os.path.join(v4, "meta.json")) as fh:
-            self.assertFalse(json.load(fh)["files_incomplete"])
-
-    def test_concurrent_publishes_of_one_artifact_keep_both_changes(self):
+    def test_concurrent_publishes_each_keep_their_version(self):
         root = make_project(files={"index.html": PAGE, "diagrams/d.html": "x", "a.css": "a", "b.css": "b"})
-        self.assertEqual(self.run_capture(publish_event(root))[0], "queued")
         script = os.path.join(SCRIPTS, "capture.py")
         env = {**os.environ, **self.env}
         procs = []
-        for name, ver in (("a.css", "va"), ("b.css", "vb")):
-            ev = publish_event(root, files={name: name}, version=ver)
-            procs.append(subprocess.Popen([sys.executable, script], stdin=subprocess.PIPE,
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env))
-            procs[-1].stdin.write(json.dumps(ev)); procs[-1].stdin.close()
+        for name, ver, seq in (("a.css", "va", 2), ("b.css", "vb", 3)):
+            ev = publish_event(root, files={name: name}, version=ver, seq=seq)
+            pr = subprocess.Popen([sys.executable, script], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, env=env)
+            pr.stdin.write(json.dumps(ev)); pr.stdin.close(); procs.append(pr)
         for pr in procs:
             pr.wait(timeout=30)
-        mirror = os.path.join(self.data, "state")
-        names = sorted(n for _, _, fs in os.walk(mirror) for n in fs if n.endswith(".css"))
-        self.assertEqual(names, ["a.css", "b.css"])
+        found = sorted(os.path.basename(d) for d in self.spool_dirs())
+        self.assertEqual(found, ["va", "vb"])
 
     def test_string_list_form(self):
         root = make_project()
         self.assertEqual(self.run_capture(publish_event(root, files=["diagrams/d.html"]))[0], "queued")
         [spool] = self.spool_dirs()
         with open(os.path.join(spool, "meta.json")) as fh:
-            self.assertEqual(json.load(fh)["files"], ["diagrams/d.html"])
+            self.assertEqual(json.load(fh)["files_written"], ["diagrams/d.html"])
 
     def test_list_form_and_server_copies(self):
         root = make_project()
@@ -271,7 +249,7 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(result, "queued")
         [spool] = self.spool_dirs()
         with open(os.path.join(spool, "meta.json")) as fh:
-            self.assertEqual(json.load(fh)["files"], ["diagrams/d.html"])
+            self.assertEqual(json.load(fh)["files_written"], ["diagrams/d.html"])
         root2 = make_project()
         self.data = os.path.realpath(tempfile.mkdtemp()); self.env["CLAUDE_PLUGIN_DATA"] = self.data
         self.assertEqual(self.run_capture(publish_event(root2, files=[{"path": "diagrams/d.html"}]))[0], "queued")
