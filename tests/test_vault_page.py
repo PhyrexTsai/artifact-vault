@@ -186,6 +186,23 @@ class VaultPageTest(unittest.TestCase):
                 with vault_page.locked_vault(root, self.env, wait=0.3):
                     pass
 
+    def test_prepare_keeps_the_trusted_head_in_sync_for_push(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "plugin", "scripts"))
+        import push
+        bare = make_vault()
+        root = make_project(bare)
+        vault_page.prepare(root, self.env, home=self.home)
+        key = os.listdir(os.path.join(self.data, "vaults"))[0]
+        clone = os.path.join(self.data, "vaults", key)
+        self.assertEqual(push.trusted_head(self.data, key, clone), push.head(clone))
+        work = os.path.join(os.path.dirname(bare), "seed")
+        with open(os.path.join(work, "templates", "base.css"), "w") as fh:
+            fh.write("body{color:green}")
+        run("git", "commit", "-qam", "green", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        vault_page.prepare(root, self.env, home=self.home)
+        self.assertEqual(push.trusted_head(self.data, key, clone), push.head(clone))
+
     def test_prepare_refreshes_templates(self):
         bare = make_vault()
         root = make_project(bare)

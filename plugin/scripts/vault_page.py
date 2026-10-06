@@ -64,10 +64,7 @@ def locked_vault(cwd, env=os.environ, wait=15.0):
                 raise VaultBusy("the library is busy syncing; try again in a moment")
             time.sleep(0.2)
         try:
-            if os.path.isdir(os.path.join(clone, ".git")):
-                push.recover(clone)
-            push.ensure_clone(found["vault"], clone)
-            push.configure(clone)
+            push.refresh_clone(data, found["key"], found["vault"], clone)
             yield found, clone
         finally:
             lock.__exit__(None, None, None)

@@ -306,6 +306,18 @@ def roll_back_unverified(data_dir, key, clone):
         git("reset", "-q", "--hard", trusted, cwd=clone)
 
 
+def refresh_clone(data_dir, key, url, clone):
+    """Bring the private clone to a clean, trusted, up-to-date state. Call with the lock held.
+    Every user of the clone (push, the page skill) goes through here so the trusted HEAD
+    always matches what is on disk."""
+    if os.path.isdir(os.path.join(clone, ".git")):
+        recover(clone)  # before pull: a dirty tree would stop the rebase
+        roll_back_unverified(data_dir, key, clone)
+    ensure_clone(url, clone)
+    configure(clone)
+    trusted_head(data_dir, key, clone, head(clone) or EMPTY)  # fresh clone or rebased onto the remote
+
+
 def push_vault(data_dir, key):
     spool = os.path.join(data_dir, "spool", key)
     target = read_json(os.path.join(spool, "vault.json"), {})
@@ -318,12 +330,7 @@ def push_vault(data_dir, key):
     with Lock(os.path.join(data_dir, "locks", f"{key}.lock")) as lock:
         if not lock.held:
             return {"skipped": "another session is pushing"}
-        if os.path.isdir(os.path.join(clone, ".git")):
-            recover(clone)  # before pull: a dirty tree would stop the rebase
-            roll_back_unverified(data_dir, key, clone)
-        ensure_clone(url, clone)
-        configure(clone)
-        trusted_head(data_dir, key, clone, head(clone) or EMPTY)  # fresh clone or rebased onto the remote
+        refresh_clone(data_dir, key, url, clone)
         queued = queued_versions(spool)
         expected, titles = {}, []
         for meta, folder in queued:
