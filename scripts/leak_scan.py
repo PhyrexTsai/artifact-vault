@@ -48,8 +48,9 @@ def shown(path, pats):
 
 def scan_text(label, data, pats, hits, where=""):
     if b"\0" in data[:8192]:
-        low = data.lower()  # binary: no line numbers, but still search the raw bytes
-        k = next((k for k, p in enumerate(pats) if p.encode("utf-8") in low), None)
+        # binary: no line numbers, but still search the raw bytes and their UTF-8 text
+        raw, text = data.lower(), data.decode("utf-8", "ignore").lower()
+        k = next((k for k, p in enumerate(pats) if p.encode("utf-8") in raw or p in text), None)
         if k is not None:
             hits.append(f"{label}{where} (binary) matches pattern #{k}")
         return
@@ -86,12 +87,16 @@ def scan_paths_and_blobs(root, pats):
     for path in git("ls-files", "-z", cwd=root).decode().split("\0"):
         if not path:
             continue
+        full = os.path.join(root, path)
         try:
-            with open(os.path.join(root, path), "rb") as fh:
-                data = fh.read()
+            if os.path.islink(full):
+                data = os.readlink(full).encode("utf-8", "replace")  # git stores the link text
+            else:
+                with open(full, "rb") as fh:
+                    data = fh.read()
         except OSError:
             continue
-        sha = git("hash-object", "--", path, cwd=root).decode().strip()
+        sha = git("hash-object", "--stdin", cwd=root, inp=data).decode().strip()  # hash what was scanned
         if sha in seen:
             continue
         seen.add(sha)

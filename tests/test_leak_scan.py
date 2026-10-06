@@ -118,6 +118,21 @@ class LeakScanTest(unittest.TestCase):
         self.assertIn("(binary)", out)
         self.assertNotIn(SECRET, out.lower())
 
+    def test_symlink_target_is_scanned(self):
+        root = make_repo({"a.txt": "x\n"})
+        os.symlink("acme-secret-project", os.path.join(root, "link"))
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+        code, out = scan(root)
+        self.assertEqual(code, 1)
+
+    def test_non_ascii_pattern_in_binary_file_fails(self):
+        root = make_repo({"a.txt": "x\n"})
+        with open(os.path.join(root, "b.bin"), "wb") as fh:
+            fh.write(b"\x00\x01" + "CAFÉ".encode("utf-8") + b"\x00")
+        commit(root, {})
+        code, out = scan(root, patterns="café")
+        self.assertEqual(code, 1)
+
     def test_legacy_noreply_without_id_passes(self):
         code, out = scan(make_repo({"a.txt": "x\n"}, email="tester@users.noreply.github.com"))
         self.assertEqual(code, 0, out)
