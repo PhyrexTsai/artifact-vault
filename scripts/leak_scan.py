@@ -48,7 +48,11 @@ def shown(path, pats):
 
 def scan_text(label, data, pats, hits, where=""):
     if b"\0" in data[:8192]:
-        return  # binary
+        low = data.lower()  # binary: no line numbers, but still search the raw bytes
+        k = next((k for k, p in enumerate(pats) if p.encode("utf-8") in low), None)
+        if k is not None:
+            hits.append(f"{label}{where} (binary) matches pattern #{k}")
+        return
     for n, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
         k = first_match(line, pats)
         if k is not None:

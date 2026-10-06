@@ -108,6 +108,16 @@ class LeakScanTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("<redacted path>", out)
 
+    def test_private_string_in_binary_file_fails(self):
+        root = make_repo({"a.txt": "x\n"})
+        with open(os.path.join(root, "img.png"), "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n\x00\x00\x00tEXtComment\x00ACME-Secret-Project\x00")
+        commit(root, {})
+        code, out = scan(root)
+        self.assertEqual(code, 1)
+        self.assertIn("(binary)", out)
+        self.assertNotIn(SECRET, out.lower())
+
     def test_legacy_noreply_without_id_passes(self):
         code, out = scan(make_repo({"a.txt": "x\n"}, email="tester@users.noreply.github.com"))
         self.assertEqual(code, 0, out)
