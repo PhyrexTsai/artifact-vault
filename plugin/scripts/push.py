@@ -231,18 +231,20 @@ def apply_version(clone, meta, folder):
 
 
 def recover(clone):
-    """Throw away uncommitted pages/ changes an earlier run left behind.
+    """Throw away uncommitted changes an earlier run (or a failed git hook) left behind.
 
-    The spool is deleted only after a commit that matches it, so anything uncommitted is
-    either still in the spool (and is applied again) or was never verified (a crashed run,
-    a hook that rewrote files). Committed but unpushed work is kept.
+    This clone belongs to the plugin and never holds your edits. The spool is deleted only
+    after a commit that matches it, so anything uncommitted is either still in the spool (and
+    is applied again) or was never verified. Committed but unpushed work is kept.
     """
-    has_head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=clone, capture_output=True).returncode == 0
-    if has_head and git("ls-tree", "HEAD", "--", "pages", cwd=clone).strip():
-        git("restore", "-q", "--source=HEAD", "--staged", "--worktree", "--", "pages", cwd=clone)
+    if head(clone):
+        git("reset", "-q", "--hard", "HEAD", cwd=clone)
     else:
-        git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", "pages", cwd=clone)
+        git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ".", cwd=clone)
     git("clean", "-q", "-f", "-d", "-x", "--", "pages", cwd=clone)
+
+
+EMPTY = "empty"  # trusted state of a vault with no commits yet
 
 
 def trusted_head(data_dir, key, clone, value=None):
@@ -264,10 +266,14 @@ def roll_back_unverified(data_dir, key, clone):
     """A run killed between commit and check leaves a commit nobody verified. Go back to the
     last trusted HEAD; the spool of anything not yet verified still exists and is re-applied."""
     trusted, current = trusted_head(data_dir, key, clone), head(clone)
-    if trusted and current and current != trusted:
-        known = subprocess.run(["git", "cat-file", "-e", f"{trusted}^{{commit}}"], cwd=clone, capture_output=True)
-        if known.returncode == 0:
-            git("reset", "-q", "--hard", trusted, cwd=clone)
+    if not trusted or not current or current == trusted:
+        return
+    if trusted == EMPTY:  # the vault was empty: an unverified first commit is undone entirely
+        undo_commit(clone, None)
+        return
+    known = subprocess.run(["git", "cat-file", "-e", f"{trusted}^{{commit}}"], cwd=clone, capture_output=True)
+    if known.returncode == 0:
+        git("reset", "-q", "--hard", trusted, cwd=clone)
 
 
 def push_vault(data_dir, key):
@@ -287,8 +293,7 @@ def push_vault(data_dir, key):
             roll_back_unverified(data_dir, key, clone)
         ensure_clone(url, clone)
         configure(clone)
-        if head(clone):
-            trusted_head(data_dir, key, clone, head(clone))  # fresh clone or rebased onto the remote
+        trusted_head(data_dir, key, clone, head(clone) or EMPTY)  # fresh clone or rebased onto the remote
         queued = queued_versions(spool)
         expected, titles = {}, []
         for meta, folder in queued:

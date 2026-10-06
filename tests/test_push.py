@@ -394,6 +394,39 @@ class PushTest(unittest.TestCase):
         self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
         self.assertIn("pages/ExAmPlEiD123/v3/index.html", vault_files(bare))
 
+    def test_failed_hook_staging_outside_pages_does_not_block(self):
+        bare = make_vault()
+        hooks = os.path.realpath(tempfile.mkdtemp())
+        with open(os.path.join(hooks, "pre-commit"), "w") as fh:
+            fh.write("#!/bin/sh\necho changed >> README.md\ngit add README.md\nexit 1\n")
+        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
+        publish(make_project(bare), self.env)
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                                          "GIT_CONFIG_VALUE_0": hooks}):
+            push.main(self.env)
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertEqual(run("git", "show", "main:README.md", cwd=bare), "vault\n")
+
+    def test_unverified_first_commit_to_empty_vault_is_undone(self):
+        bare = make_vault(empty=True)
+        root = make_project(bare)
+        publish(root, self.env)
+        key = os.listdir(os.path.join(self.data, "spool"))[0]
+        with mock.patch.object(push, "check_commit", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                push.push_vault(self.data, key)
+        clone = os.path.join(self.data, "vaults", key)
+        with open(os.path.join(clone, "extra.txt"), "w") as fh:
+            fh.write("x\n")
+        run("git", "add", "extra.txt", cwd=clone)
+        run("git", "commit", "-q", "--amend", "--no-edit", cwd=clone)  # a hook slipped in a file
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        files = vault_files(bare)
+        self.assertNotIn("extra.txt", files)
+        self.assertIn("pages/ExAmPlEiD123/v1/index.html", files)
+
     def test_hook_rewrite_left_unstaged_is_not_pushed_later(self):
         bare = make_vault()
         hooks = os.path.realpath(tempfile.mkdtemp())
