@@ -127,16 +127,16 @@ class CaptureTest(unittest.TestCase):
         root = make_project(config=False)
         self.assertEqual(self.run_capture(publish_event(root)), (None, None))
 
-    def test_same_content_is_not_stored_twice(self):
+    def test_every_publish_is_kept_with_its_digest(self):
         root = make_project()
         self.assertEqual(self.run_capture(publish_event(root))[0], "queued")
-        result, msg = self.run_capture(publish_event(root, version="1700000001-ef01", seq=2))
-        self.assertEqual(result, "unchanged")
-        self.assertEqual(len(self.spool_dirs()), 1)
-        with open(os.path.join(root, "diagrams", "d.html"), "w") as fh:
-            fh.write("<svg>changed</svg>\n")
-        self.assertEqual(self.run_capture(publish_event(root, version="1700000002-ef02", seq=3))[0], "queued")
-        self.assertEqual(len(self.spool_dirs()), 2)
+        self.assertEqual(self.run_capture(publish_event(root, version="1700000001-ef01", seq=2))[0], "queued")
+        digests = []
+        for d in self.spool_dirs():
+            with open(os.path.join(d, "meta.json")) as fh:
+                digests.append(json.load(fh)["digest"])
+        self.assertEqual(len(digests), 2)
+        self.assertEqual(digests[0], digests[1])  # same content: push time drops the duplicate
 
     def test_unsafe_published_paths_are_dropped(self):
         root = make_project()
@@ -182,6 +182,15 @@ class CaptureTest(unittest.TestCase):
         result, msg = self.run_capture(publish_event(root, files={f"{key}.txt": "diagrams/d.html"}))
         self.assertEqual(result, "secret")
         self.assertNotIn(key, json.dumps(msg))
+        self.assertEqual(self.spool_dirs(), [])
+
+    def test_credential_in_removed_or_remote_name_blocks_capture(self):
+        key = "ghp_" + "C" * 36
+        root = make_project()
+        for files in ({f"{key}.txt": None}, {f"{key}.js": {"artifact": "a", "path": "x.js"}}):
+            result, msg = self.run_capture(publish_event(root, files=files))
+            self.assertEqual(result, "secret", files)
+            self.assertNotIn(key, json.dumps(msg))
         self.assertEqual(self.spool_dirs(), [])
 
     def test_credential_in_title_blocks_capture_without_echoing_it(self):

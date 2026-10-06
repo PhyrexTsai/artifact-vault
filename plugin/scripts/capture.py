@@ -5,8 +5,8 @@ version meta file. It never clones, commits, or uses the network; push.sh does t
 
 Skips quietly when: the call is not a publish (quickstart, read, list, ...), it uploads an
 asset, it has no file_path, the project has no vault, or the page carries
-<meta name="vault:skip">. Skips with a message when the content did not change or when it
-looks like it contains a credential.
+<meta name="vault:skip">. Skips with a message when the page looks like it contains a
+credential. Every other publish is kept; duplicates are dropped at push time, in seq order.
 
 Never fails the session: unexpected errors go to stderr and the hook exits 0.
 """
@@ -170,7 +170,7 @@ def write_version(spool, main, extras, meta):
 
 
 def capture(event, env=os.environ):
-    """Return what happened: None (not ours), "secret", "unchanged", or "queued"."""
+    """Return what happened: None (not ours), "secret", or "queued"."""
     inp = event.get("tool_input") or {}
     res = event.get("tool_response") or {}
     if inp.get("action", "publish") != "publish" or inp.get("asset") or not inp.get("file_path"):
@@ -218,23 +218,16 @@ def capture(event, env=os.environ):
     problems += ["path conflict"] * clashes
 
     title = str(res.get("title") or art_id)
-    names = "\n".join(pub for pub, _ in written).encode("utf-8")
+    names = "\n".join([pub for pub, _ in written] + removed + remote).encode("utf-8")
     kind = find_secret([main, title.encode("utf-8"), names] + [d for _, d in written])
     if kind:  # the title may itself hold the credential, so name the page by id only
         out(system=f"artifact-vault：artifact {art_id} 看起來含有 {kind}，沒有存進書庫。移除後重新發佈即可。",
             context=f"artifact-vault did not queue this page: it appears to contain a {kind}.")
         return "secret"
 
-    dig = digest(main, written + [(f"-{r}", b"") for r in sorted(removed)])
-    state_path = os.path.join(data_dir, "state", found["key"], f"{art_id}.json")
-    try:
-        with open(state_path) as fh:
-            state = json.load(fh)
-    except (OSError, ValueError):
-        state = {}
-    if state.get("digest") == dig:
-        out(system=f"artifact-vault：「{title}」內容沒有變，書庫不重存。")
-        return "unchanged"
+    # Every publish is kept. Skipping duplicates needs the versions in seq order, which only
+    # push time has, so the digest is recorded here and compared there.
+    dig = digest(main, written + [(f"-{r}", b"") for r in sorted(removed)] + [(f"~{r}", b"") for r in sorted(remote)])
 
     now = datetime.datetime.now(datetime.timezone.utc)
     version = re.sub(r"[^A-Za-z0-9._-]", "-", str(res.get("version") or "")).strip(".") \
@@ -260,9 +253,6 @@ def capture(event, env=os.environ):
         "digest": dig,
     }
     write_version(os.path.join(data_dir, "spool", found["key"], art_id, version), main, written, meta)
-    os.makedirs(os.path.dirname(state_path), exist_ok=True)
-    with open(state_path, "w") as fh:
-        json.dump({"digest": dig, "version": version}, fh)
 
     note = f"（略過 {len(problems)} 個子檔案）" if problems else ""
     out(system=f"artifact-vault：已排入書庫 {found['name']}：「{title}」{note}",
