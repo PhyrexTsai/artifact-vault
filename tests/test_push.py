@@ -367,6 +367,33 @@ class PushTest(unittest.TestCase):
         self.assertTrue(self.state()["ok"], self.state())
         self.assertIn("pages/ExAmPlEiD123/v2/index.html", vault_files(bare))
 
+    def test_run_killed_after_commit_before_retire_recovers(self):
+        bare = make_vault()
+        publish(make_project(bare), self.env)
+        with mock.patch.object(push, "retire", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                push.push_vault(self.data, os.listdir(os.path.join(self.data, "spool"))[0])
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertEqual(self.spooled(), [])
+        self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
+
+    def test_unverified_commit_from_a_killed_run_is_rolled_back(self):
+        bare = make_vault()
+        root = make_project(bare)
+        publish(root, self.env)
+        push.main(self.env)
+        key = os.listdir(os.path.join(self.data, "spool"))[0]
+        clone = os.path.join(self.data, "vaults", key)
+        with open(os.path.join(clone, "pages", "ExAmPlEiD123", "v1", "index.html"), "w") as fh:
+            fh.write("corrupted\n")
+        run("git", "commit", "-qam", "unverified", cwd=clone)  # as if killed before check_commit
+        publish(root, self.env, version="v3", seq=3, body="<p>three</p>\n")
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
+        self.assertIn("pages/ExAmPlEiD123/v3/index.html", vault_files(bare))
+
     def test_hook_rewrite_left_unstaged_is_not_pushed_later(self):
         bare = make_vault()
         hooks = os.path.realpath(tempfile.mkdtemp())

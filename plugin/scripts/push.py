@@ -158,8 +158,7 @@ def check_commit(clone, before, expected):
     Anything else means a git hook or filter touched the archive (this round's files or
     older versions), so the commit cannot be trusted.
     """
-    if head(clone) == before:
-        return "nothing was committed"
+    unchanged = head(clone) == before  # e.g. a run killed after its commit, before retire()
     git("checkout", "-q", "HEAD", "--", "pages", cwd=clone)  # drop rewrites a hook left unstaged
     committed = {}  # -z: git would otherwise quote non-ASCII paths such as Chinese names
     for entry in git("ls-tree", "-r", "-z", "HEAD", "--", "pages", cwd=clone).split("\0"):
@@ -168,6 +167,8 @@ def check_commit(clone, before, expected):
             committed[path] = info.split()[2]
     if any(committed.get(p) != sha for p, sha in expected.items()):
         return "archived files missing or changed in the commit"
+    if unchanged:
+        return None  # already committed with the exact bytes: just retire the spool
     diff = ["diff", "--name-only", "-z", "--no-renames", before, "HEAD", "--"] if before else \
         ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--"]
     touched = {p for p in git(*diff, cwd=clone).split("\0") if p}
@@ -244,6 +245,31 @@ def recover(clone):
     git("clean", "-q", "-f", "-d", "-x", "--", "pages", cwd=clone)
 
 
+def trusted_head(data_dir, key, clone, value=None):
+    """Read or record the last HEAD that was verified (or came from the remote)."""
+    path = os.path.join(data_dir, "state", f"{key}-verified")
+    if value is not None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(value)
+        return value
+    try:
+        with open(path) as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def roll_back_unverified(data_dir, key, clone):
+    """A run killed between commit and check leaves a commit nobody verified. Go back to the
+    last trusted HEAD; the spool of anything not yet verified still exists and is re-applied."""
+    trusted, current = trusted_head(data_dir, key, clone), head(clone)
+    if trusted and current and current != trusted:
+        known = subprocess.run(["git", "cat-file", "-e", f"{trusted}^{{commit}}"], cwd=clone, capture_output=True)
+        if known.returncode == 0:
+            git("reset", "-q", "--hard", trusted, cwd=clone)
+
+
 def push_vault(data_dir, key):
     spool = os.path.join(data_dir, "spool", key)
     target = read_json(os.path.join(spool, "vault.json"), {})
@@ -258,8 +284,11 @@ def push_vault(data_dir, key):
             return {"skipped": "another session is pushing"}
         if os.path.isdir(os.path.join(clone, ".git")):
             recover(clone)  # before pull: a dirty tree would stop the rebase
+            roll_back_unverified(data_dir, key, clone)
         ensure_clone(url, clone)
         configure(clone)
+        if head(clone):
+            trusted_head(data_dir, key, clone, head(clone))  # fresh clone or rebased onto the remote
         queued = queued_versions(spool)
         expected, titles = {}, []
         for meta, folder in queued:
@@ -272,6 +301,7 @@ def push_vault(data_dir, key):
             if problem:
                 undo_commit(clone, before)
                 raise RuntimeError(f"{problem}; commit undone, spool kept")
+            trusted_head(data_dir, key, clone, head(clone))
         trash = os.path.join(data_dir, "trash")
         shutil.rmtree(trash, ignore_errors=True)  # leftovers of an interrupted retire()
         for _, folder in queued:  # only now: the commit holds their content
