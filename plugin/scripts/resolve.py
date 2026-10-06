@@ -4,7 +4,7 @@ A project opts in with `<repo root>/.claude/artifact-vault.json`:
 
     { "vault": "git@github.com:example-org/example-artifact.git" }
 
-`vault` is a git URL (ssh, https) or an absolute path to a local repo. Without the file,
+`vault` is any git address (scp-like, ssh://, https://, file://) or an absolute path. Without the file,
 or outside a git repo, the project has no vault and every hook and skill does nothing.
 
 No network access and no writes: this runs inside a synchronous hook.
@@ -19,8 +19,6 @@ import subprocess
 import sys
 
 CONFIG = os.path.join(".claude", "artifact-vault.json")
-# scp-like [user@]host:path (any user, ssh aliases), ssh://, https://, file://
-URL = re.compile(r"^((?:[\w.-]+@)?[\w.-]+:[^\s/]\S*|ssh://\S+|https://\S+|file://\S+)$")
 
 
 def project_root(cwd):
@@ -69,10 +67,13 @@ def resolve(cwd):
         print(f"artifact-vault: ignoring {CONFIG}: missing \"vault\"", file=sys.stderr)
         return None
     url = os.path.expanduser(url.strip())
+    # Git understands many address forms (scp-like, ssh://, https://, file://, aliases).
+    # Only reject what is clearly not a remote: relative paths and whitespace. A wrong
+    # address surfaces as a git error when the vault is cloned.
     if os.path.isabs(url):
         url = os.path.normpath(url)
-    elif not URL.match(url):
-        print(f"artifact-vault: ignoring {CONFIG}: \"vault\" must be a git URL or an absolute path", file=sys.stderr)
+    elif ":" not in url or re.search(r"\s", url):
+        print(f"artifact-vault: ignoring {CONFIG}: \"vault\" must be a git address or an absolute path", file=sys.stderr)
         return None
     name = vault_name(url)
     # Two vaults can share a repo name (different owners), so the clone folder also

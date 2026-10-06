@@ -72,7 +72,7 @@ class ResolveTest(unittest.TestCase):
     def test_accepted_url_forms(self):
         for v in ["alice@example.com:team/vault.git", "vault-host:team/vault.git",
                   "ssh://git@example.com/team/vault.git", "https://example.com/team/vault.git",
-                  "file:///tmp/vault.git"]:
+                  "file:///tmp/vault.git", "git@example.com:/srv/vault.git"]:
             got = resolve.resolve(make_project({"vault": v}))
             self.assertIsNotNone(got, v)
             self.assertEqual(got["name"], "vault", v)
@@ -82,7 +82,8 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(got["name"], "vault-sandbox")
 
     def test_invalid_configs_are_no_vault_with_reason(self):
-        for cfg in ["{not json", {"vault": ""}, {"other": 1}, ["x"], {"vault": "relative/path"}]:
+        for cfg in ["{not json", {"vault": ""}, {"other": 1}, ["x"], {"vault": "relative/path"},
+                    {"vault": "host:path with space"}]:
             err = io.StringIO()
             with redirect_stderr(err):
                 self.assertIsNone(resolve.resolve(make_project(cfg)), cfg)
