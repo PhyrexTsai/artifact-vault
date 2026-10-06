@@ -177,7 +177,7 @@ def check_commit(clone, before, expected):
     unchanged = head(clone) == before  # e.g. a run killed after its commit, before retire()
     git("checkout", "-q", "HEAD", "--", "pages", cwd=clone)  # drop rewrites a hook left unstaged
     committed = {}  # -z: git would otherwise quote non-ASCII paths such as Chinese names
-    for entry in git("ls-tree", "-r", "-z", "HEAD", "--", "pages", cwd=clone).split("\0"):
+    for entry in git("ls-tree", "-r", "-z", "HEAD", cwd=clone).split("\0"):
         if "\t" in entry:
             info, path = entry.split("\t", 1)
             committed[path] = info.split()[2]
