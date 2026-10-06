@@ -81,8 +81,8 @@ def safe_published(path):
         return None
     if any(p in ("", ".", "..") for p in path.split("/")):
         return None
-    if path == "index.html" or path.startswith("meta.json"):
-        return None  # reserved names inside the version folder
+    if path.lower() in ("index.html", "meta.json"):
+        return None  # reserved names (compared case-insensitively for macOS and Windows)
     return path
 
 
@@ -100,11 +100,16 @@ def supporting_files(inp, cwd):
             if isinstance(src, dict):
                 src = src.get("from")  # an {artifact, path} copy has no local source
             items.append((pub, src))
+    taken = set()
     for pub, src in items:
         clean = safe_published(pub)
+        if clean is not None and clean.lower() in taken:
+            clean = None  # two paths that differ only in case would overwrite each other
         if clean is None:
             yield None, None, "unsafe published path"
-        elif not isinstance(src, str):
+            continue
+        taken.add(clean.lower())
+        if not isinstance(src, str):
             yield clean, None, None  # removal or server-side copy: nothing local to keep
         else:
             yield clean, os.path.normpath(src if os.path.isabs(src) else os.path.join(base, src)), None
@@ -182,10 +187,10 @@ def capture(event, env=os.environ):
             except OSError:
                 problems.append(f"missing source for {pub}")
 
-    title = res.get("title") or art_id
-    kind = find_secret([main] + [d for _, d in extras])
-    if kind:
-        out(system=f"artifact-vault：「{title}」看起來含有 {kind}，沒有存進書庫。移除後重新發佈即可。",
+    title = str(res.get("title") or art_id)
+    kind = find_secret([main, title.encode("utf-8")] + [d for _, d in extras])
+    if kind:  # the title may itself hold the credential, so name the page by id only
+        out(system=f"artifact-vault：artifact {art_id} 看起來含有 {kind}，沒有存進書庫。移除後重新發佈即可。",
             context=f"artifact-vault did not queue this page: it appears to contain a {kind}.")
         return "secret"
 
@@ -202,7 +207,8 @@ def capture(event, env=os.environ):
         return "unchanged"
 
     now = datetime.datetime.now(datetime.timezone.utc)
-    version = re.sub(r"[^A-Za-z0-9._-]", "-", str(res.get("version") or "")).strip(".") or now.strftime("%Y%m%dT%H%M%SZ")
+    version = re.sub(r"[^A-Za-z0-9._-]", "-", str(res.get("version") or "")).strip(".") \
+        or f"{now.strftime('%Y%m%dT%H%M%SZ')}-{dig[:8]}"  # no version: time plus content hash
     page_type = metas.get("vault:type", "").lower()
     caps = inp.get("capabilities")
     meta = {

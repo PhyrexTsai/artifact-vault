@@ -151,6 +151,34 @@ class CaptureTest(unittest.TestCase):
             self.assertEqual(json.load(fh)["files"], ["ok/d.html"])
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(spool), "escape.html")))
 
+    def test_case_variants_of_reserved_and_duplicate_paths_are_dropped(self):
+        root = make_project()
+        files = {"Index.html": "diagrams/d.html", "META.JSON": "diagrams/d.html",
+                 "Diagrams/D.html": "diagrams/d.html", "diagrams/d.html": "diagrams/d.html"}
+        result, msg = self.run_capture(publish_event(root, files=files))
+        self.assertEqual(result, "queued")
+        [spool] = self.spool_dirs()
+        with open(os.path.join(spool, "index.html")) as fh:
+            self.assertEqual(fh.read(), PAGE)
+        with open(os.path.join(spool, "meta.json")) as fh:
+            self.assertEqual(len(json.load(fh)["files"]), 1)
+
+    def test_credential_in_title_blocks_capture_without_echoing_it(self):
+        key = "ghp_" + "A" * 36
+        root = make_project()
+        result, msg = self.run_capture(publish_event(root, title=f"notes {key}"))
+        self.assertEqual(result, "secret")
+        self.assertNotIn(key, json.dumps(msg))
+        self.assertEqual(self.spool_dirs(), [])
+
+    def test_missing_version_gets_unique_folder_per_content(self):
+        root = make_project()
+        self.assertEqual(self.run_capture(publish_event(root, version=None))[0], "queued")
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write(PAGE + "<p>v2</p>\n")
+        self.assertEqual(self.run_capture(publish_event(root, version=None))[0], "queued")
+        self.assertEqual(len(self.spool_dirs()), 2)
+
     def test_list_form_and_server_copies(self):
         root = make_project()
         files = {"diagrams/d.html": {"from": "diagrams/d.html"}, "copied.css": {"artifact": "x", "path": "a.css"},
