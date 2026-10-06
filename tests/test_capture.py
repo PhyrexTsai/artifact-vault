@@ -216,6 +216,46 @@ class CaptureTest(unittest.TestCase):
         with open(os.path.join(v3, "meta.json")) as fh:
             self.assertEqual(json.load(fh)["files"], [])
 
+    def test_skipped_version_marks_carried_files_incomplete(self):
+        root = make_project()
+        self.assertEqual(self.run_capture(publish_event(root))[0], "queued")
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write('<meta name="vault:skip">\n')
+        self.assertIsNone(self.run_capture(publish_event(root, version="v2"))[0])
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write(PAGE + "<p>v3</p>\n")
+        result, msg = self.run_capture(publish_event(root, files={}, version="v3"))
+        self.assertEqual(result, "queued")
+        v3 = [d for d in self.spool_dirs() if d.endswith("v3")][0]
+        with open(os.path.join(v3, "meta.json")) as fh:
+            meta = json.load(fh)
+        self.assertEqual(meta["files"], [])
+        self.assertTrue(meta["files_incomplete"])
+        self.assertIn("只含本次列出", msg["systemMessage"])
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write(PAGE + "<p>v4</p>\n")
+        self.run_capture(publish_event(root, version="v4"))
+        v4 = [d for d in self.spool_dirs() if d.endswith("v4")][0]
+        with open(os.path.join(v4, "meta.json")) as fh:
+            self.assertFalse(json.load(fh)["files_incomplete"])
+
+    def test_concurrent_publishes_of_one_artifact_keep_both_changes(self):
+        root = make_project(files={"index.html": PAGE, "diagrams/d.html": "x", "a.css": "a", "b.css": "b"})
+        self.assertEqual(self.run_capture(publish_event(root))[0], "queued")
+        script = os.path.join(SCRIPTS, "capture.py")
+        env = {**os.environ, **self.env}
+        procs = []
+        for name, ver in (("a.css", "va"), ("b.css", "vb")):
+            ev = publish_event(root, files={name: name}, version=ver)
+            procs.append(subprocess.Popen([sys.executable, script], stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env))
+            procs[-1].stdin.write(json.dumps(ev)); procs[-1].stdin.close()
+        for pr in procs:
+            pr.wait(timeout=30)
+        mirror = os.path.join(self.data, "state")
+        names = sorted(n for _, _, fs in os.walk(mirror) for n in fs if n.endswith(".css"))
+        self.assertEqual(names, ["a.css", "b.css"])
+
     def test_string_list_form(self):
         root = make_project()
         self.assertEqual(self.run_capture(publish_event(root, files=["diagrams/d.html"]))[0], "queued")
