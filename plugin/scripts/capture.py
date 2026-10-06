@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 import uuid
 from html.parser import HTMLParser
 
@@ -137,24 +138,30 @@ def supporting_files(inp, cwd):
                 yield clean, "set", os.path.normpath(src if os.path.isabs(src) else os.path.join(base, src))
 
 
+def fs_key(path):
+    """How case-insensitive, normalizing file systems (macOS, Windows) compare names."""
+    return unicodedata.normalize("NFC", path).casefold()
+
+
 def drop_conflicts(extras):
     """Keep files that can all be written into one folder next to index.html and meta.json.
 
-    Compared case-insensitively (macOS, Windows): a reserved name, a duplicate, a path that
-    is both a file and a folder, or a folder spelled with different case is dropped instead
-    of failing the whole version or landing under a spelling meta.json does not record.
+    Names are compared the way macOS and Windows compare them (case and Unicode form): a
+    reserved name, a duplicate, a path that is both a file and a folder, or a folder spelled
+    differently is dropped instead of failing the version or landing under another spelling.
     """
     files, dirs, kept = {"index.html", "meta.json"}, {}, []
     for pub, data in extras:
         parts = pub.split("/")
         prefixes = ["/".join(parts[:i]) for i in range(1, len(parts))]
-        clash = pub.lower() in files or pub.lower() in dirs \
-            or any(p.lower() in files or dirs.get(p.lower(), p) != p for p in prefixes)
+        key = fs_key(pub)
+        clash = key in files or key in dirs \
+            or any(fs_key(p) in files or dirs.get(fs_key(p), p) != p for p in prefixes)
         if clash:
             continue
-        files.add(pub.lower())
+        files.add(key)
         for p in prefixes:
-            dirs[p.lower()] = p
+            dirs[fs_key(p)] = p
         kept.append((pub, data))
     return kept, len(extras) - len(kept)
 
@@ -217,9 +224,9 @@ def capture(event, env=os.environ):
     main_path = inp["file_path"]
     with open(main_path if os.path.isabs(main_path) else os.path.join(cwd, main_path), "rb") as fh:
         main = fh.read()
-    if SKIP_TOKEN.search(main):
-        return None
     metas = page_meta(main)
+    if SKIP_TOKEN.search(main) or "vault:skip" in metas:  # raw token, or an encoded form the parser decoded
+        return None
 
     # Store only what this publish changed. A republish keeps the files it does not list,
     # so the full file set of a version is rebuilt later by replaying versions in seq order

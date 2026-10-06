@@ -138,6 +138,14 @@ class CaptureTest(unittest.TestCase):
         root = make_project(files={"index.html": PAGE, "k.asc": "-----BEGIN PGP PRIVATE KEY BLOCK-----\nx\n"})
         self.assertEqual(self.run_capture(publish_event(root, files={"k.asc": "k.asc"}))[0], "secret")
 
+    def test_entity_encoded_skip_is_honored(self):
+        root = make_project(files={"index.html": '<meta name="vault&#58;skip">\n'})
+        self.assertIsNone(self.run_capture(publish_event(root, files={}))[0])
+
+    def test_unicode_equivalent_names_clash(self):
+        kept, dropped = capture.drop_conflicts([("caf\u00e9.txt", b"a"), ("cafe\u0301.txt", b"b")])
+        self.assertEqual(dropped, 1)
+
     def test_folder_spelled_with_different_case_is_dropped(self):
         kept, dropped = capture.drop_conflicts(sorted([("Assets/a.svg", b"a"), ("assets/b.svg", b"b")]))
         self.assertEqual([p for p, _ in kept], ["Assets/a.svg"])
