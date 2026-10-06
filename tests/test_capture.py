@@ -193,6 +193,16 @@ class CaptureTest(unittest.TestCase):
             self.assertNotIn(key, json.dumps(msg))
         self.assertEqual(self.spool_dirs(), [])
 
+    def test_encrypted_private_key_blocks_capture(self):
+        root = make_project(files={"index.html": PAGE, "k.pem": "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n"})
+        self.assertEqual(self.run_capture(publish_event(root, files={"k.pem": "k.pem"}))[0], "secret")
+
+    def test_missing_version_never_overwrites(self):
+        root = make_project()
+        for seq in (1, 2):
+            self.assertEqual(self.run_capture(publish_event(root, version=None, seq=seq))[0], "queued")
+        self.assertEqual(len(self.spool_dirs()), 2)
+
     def test_credential_in_title_blocks_capture_without_echoing_it(self):
         key = "ghp_" + "A" * 36
         root = make_project()

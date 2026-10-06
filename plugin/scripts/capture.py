@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from html.parser import HTMLParser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,7 +34,7 @@ SECRETS = [
     ("OpenAI API key", re.compile(rb"\bsk-(proj-)?[A-Za-z0-9_-]{32,}")),
     ("Slack token", re.compile(rb"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
     ("Google API key", re.compile(rb"\bAIza[0-9A-Za-z_-]{35}\b")),
-    ("private key", re.compile(rb"-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----")),
+    ("private key", re.compile(rb"-----BEGIN (RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----")),
 ]
 
 
@@ -231,7 +232,7 @@ def capture(event, env=os.environ):
 
     now = datetime.datetime.now(datetime.timezone.utc)
     version = re.sub(r"[^A-Za-z0-9._-]", "-", str(res.get("version") or "")).strip(".") \
-        or f"{now.strftime('%Y%m%dT%H%M%SZ')}-{dig[:8]}"  # no version: time plus content hash
+        or f"{now.strftime('%Y%m%dT%H%M%SZ')}-s{res.get('seq') or 0}-{uuid.uuid4().hex[:8]}"  # no version: unique
     page_type = metas.get("vault:type", "").lower()
     caps = inp.get("capabilities")
     meta = {
