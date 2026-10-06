@@ -83,6 +83,7 @@ def resolve(cwd):
     return {
         "vault": url,
         "name": name,
+        "key": folder,
         "clone": os.path.join(data, "vaults", folder) if data else None,
         "project": root,
         "repo": repo_name(root),

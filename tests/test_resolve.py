@@ -42,6 +42,7 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(got["vault"], VAULT)
         self.assertEqual(got["name"], "example-artifact")
         self.assertRegex(got["clone"], r"^/tmp/plugin-data/vaults/example-artifact-[0-9a-f]{10}$")
+        self.assertEqual(os.path.basename(got["clone"]), got["key"])
         self.assertEqual(got["repo"], "example-project")
         self.assertEqual(got["project"], root)
 
