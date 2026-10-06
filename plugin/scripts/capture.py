@@ -34,7 +34,7 @@ SECRETS = [
     ("OpenAI API key", re.compile(rb"\bsk-(proj-)?[A-Za-z0-9_-]{32,}")),
     ("Slack token", re.compile(rb"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
     ("Google API key", re.compile(rb"\bAIza[0-9A-Za-z_-]{35}\b")),
-    ("private key", re.compile(rb"-----BEGIN (RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----")),
+    ("private key", re.compile(rb"-----BEGIN ((RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----")),
 ]
 
 
@@ -49,12 +49,14 @@ class _Meta(HTMLParser):
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.found, self.depth = {}, 0
+        self.found, self.inside = {}, None
 
     def handle_starttag(self, tag, attrs):
+        if self.inside:  # text inside a container is not markup, even if it looks like it
+            return
         if tag in self.TEXT_CONTAINERS:
-            self.depth += 1
-        elif tag == "meta" and self.depth == 0:
+            self.inside = tag
+        elif tag == "meta":
             a = {k.lower(): (v or "") for k, v in attrs}
             name = a.get("name", "").strip().lower()
             if name.startswith("vault:") and name not in self.found:
@@ -65,8 +67,8 @@ class _Meta(HTMLParser):
             self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
-        if tag in self.TEXT_CONTAINERS and self.depth:
-            self.depth -= 1
+        if tag == self.inside:
+            self.inside = None
 
 
 def page_meta(html_bytes):
@@ -135,18 +137,21 @@ def supporting_files(inp, cwd):
 def drop_conflicts(extras):
     """Keep files that can all be written into one folder next to index.html and meta.json.
 
-    Compared case-insensitively (macOS, Windows): a reserved name, a duplicate, or a path
-    that is both a file and a folder is dropped instead of failing the whole version.
+    Compared case-insensitively (macOS, Windows): a reserved name, a duplicate, a path that
+    is both a file and a folder, or a folder spelled with different case is dropped instead
+    of failing the whole version or landing under a spelling meta.json does not record.
     """
-    files, dirs, kept = {"index.html", "meta.json"}, set(), []
+    files, dirs, kept = {"index.html", "meta.json"}, {}, []
     for pub, data in extras:
-        low = pub.lower()
-        parts = low.split("/")
-        ancestors = {"/".join(parts[:i]) for i in range(1, len(parts))}
-        if low in files or low in dirs or ancestors & files:
+        parts = pub.split("/")
+        prefixes = ["/".join(parts[:i]) for i in range(1, len(parts))]
+        clash = pub.lower() in files or pub.lower() in dirs \
+            or any(p.lower() in files or dirs.get(p.lower(), p) != p for p in prefixes)
+        if clash:
             continue
-        files.add(low)
-        dirs |= ancestors
+        files.add(pub.lower())
+        for p in prefixes:
+            dirs[p.lower()] = p
         kept.append((pub, data))
     return kept, len(extras) - len(kept)
 

@@ -128,6 +128,20 @@ class CaptureTest(unittest.TestCase):
         root = make_project(files={"index.html": page})
         self.assertEqual(self.run_capture(publish_event(root, files={}))[0], "queued")
 
+    def test_tag_text_inside_textarea_does_not_hide_a_real_skip(self):
+        page = '<textarea><template></textarea><meta name="vault:skip">\n'
+        root = make_project(files={"index.html": page})
+        self.assertIsNone(self.run_capture(publish_event(root, files={}))[0])
+
+    def test_pgp_private_key_blocks_capture(self):
+        root = make_project(files={"index.html": PAGE, "k.asc": "-----BEGIN PGP PRIVATE KEY BLOCK-----\nx\n"})
+        self.assertEqual(self.run_capture(publish_event(root, files={"k.asc": "k.asc"}))[0], "secret")
+
+    def test_folder_spelled_with_different_case_is_dropped(self):
+        kept, dropped = capture.drop_conflicts(sorted([("Assets/a.svg", b"a"), ("assets/b.svg", b"b")]))
+        self.assertEqual([p for p, _ in kept], ["Assets/a.svg"])
+        self.assertEqual(dropped, 1)
+
     def test_digest_distinguishes_operations(self):
         self.assertNotEqual(capture.digest(b"p", [], ["a.css"], []), capture.digest(b"p", [("-a.css", b"")], [], []))
         self.assertNotEqual(capture.digest(b"p", [("a", b"x\0b")], [], []),
