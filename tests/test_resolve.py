@@ -69,6 +69,14 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(got["repo"], "example-project")
         self.assertEqual(got["project"], wt)
 
+    def test_accepted_url_forms(self):
+        for v in ["alice@example.com:team/vault.git", "vault-host:team/vault.git",
+                  "ssh://git@example.com/team/vault.git", "https://example.com/team/vault.git",
+                  "file:///tmp/vault.git"]:
+            got = resolve.resolve(make_project({"vault": v}))
+            self.assertIsNotNone(got, v)
+            self.assertEqual(got["name"], "vault", v)
+
     def test_local_absolute_path_vault_is_allowed(self):
         got = resolve.resolve(make_project({"vault": "/tmp/vault-sandbox.git"}))
         self.assertEqual(got["name"], "vault-sandbox")

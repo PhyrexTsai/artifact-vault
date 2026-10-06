@@ -19,7 +19,8 @@ import subprocess
 import sys
 
 CONFIG = os.path.join(".claude", "artifact-vault.json")
-URL = re.compile(r"^(git@[^:\s]+:\S+|ssh://\S+|https://\S+)$")
+# scp-like [user@]host:path (any user, ssh aliases), ssh://, https://, file://
+URL = re.compile(r"^((?:[\w.-]+@)?[\w.-]+:[^\s/]\S*|ssh://\S+|https://\S+|file://\S+)$")
 
 
 def project_root(cwd):
