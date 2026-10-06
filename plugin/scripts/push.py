@@ -117,7 +117,12 @@ def ensure_clone(url, clone):
     os.makedirs(os.path.dirname(clone), exist_ok=True)
     tmp = f"{clone}.cloning{os.getpid()}"
     shutil.rmtree(tmp, ignore_errors=True)
-    git("clone", "--quiet", url, tmp, timeout=CLONE_TIMEOUT)
+    # No checkout until configure() has turned off content conversion, or the vault's own
+    # .gitattributes could rewrite archived files on the way out.
+    git("clone", "--quiet", "--no-checkout", url, tmp, timeout=CLONE_TIMEOUT)
+    configure(tmp)
+    if subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=tmp, capture_output=True).returncode == 0:
+        git("checkout", "--quiet", cwd=tmp)
     os.replace(tmp, clone)
 
 
@@ -149,16 +154,22 @@ def commit_pages(clone, subject):
 
 
 def apply_version(clone, meta, folder):
-    """Copy one version into pages/<id>/<version>/. Return the paths it should commit."""
-    rel = os.path.join("pages", meta["id"], meta["version"])
-    dest = os.path.join(clone, rel)
+    """Copy one version into pages/<id>/<version>/.
+
+    Return {repo path: blob id} computed from the spool copy, before any git step can touch
+    the bytes, so the commit can be checked against what was captured.
+    """
+    rel = "/".join(("pages", meta["id"], meta["version"]))
+    sources = []
+    for d, _, names in os.walk(folder):
+        for n in names:
+            sources.append(os.path.relpath(os.path.join(d, n), folder).replace(os.sep, "/"))
+    blobs = git("hash-object", "--no-filters", "--stdin-paths", cwd=folder,
+                inp="\n".join(sources) + "\n").split() if sources else []
+    dest = os.path.join(clone, *rel.split("/"))
     shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(folder, dest)
-    paths = []
-    for d, _, names in os.walk(dest):
-        for n in names:
-            paths.append(os.path.relpath(os.path.join(d, n), clone).replace(os.sep, "/"))
-    return paths
+    return {f"{rel}/{src}": blob for src, blob in zip(sources, blobs)}
 
 
 def recover(clone):
@@ -182,9 +193,9 @@ def push_vault(data_dir, key):
         ensure_clone(url, clone)
         configure(clone)
         queued = queued_versions(spool)
-        expected, titles = [], []
+        expected, titles = {}, []
         for meta, folder in queued:
-            expected += apply_version(clone, meta, folder)
+            expected.update(apply_version(clone, meta, folder))
             titles.append(meta.get("title") or meta["id"])
         if expected:
             commit_pages(clone, f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles)} versions")
@@ -194,9 +205,7 @@ def push_vault(data_dir, key):
                 if "\t" in entry:
                     info, path = entry.split("\t", 1)
                     committed[path] = info.split()[2]
-            want = git("hash-object", "--no-filters", "--stdin-paths", cwd=clone,
-                       inp="\n".join(expected) + "\n").split()
-            bad = [p for p, sha in zip(expected, want) if committed.get(p) != sha]
+            bad = [p for p, sha in expected.items() if committed.get(p) != sha]
             if bad:
                 raise RuntimeError(f"{len(bad)} archived file(s) missing or changed in the commit; spool kept")
         for _, folder in queued:  # only now: the commit holds their content

@@ -200,6 +200,37 @@ class PushTest(unittest.TestCase):
                              capture_output=True).stdout
         self.assertIn(b"\r\n", raw)
 
+    def test_fresh_clone_does_not_rewrite_existing_archives(self):
+        bare = make_vault()
+        root = make_project(bare)
+        publish(root, self.env, version="v1", seq=1, body="<p>lf</p>\n")
+        push.main(self.env)
+        work = os.path.join(os.path.dirname(bare), "seed")
+        run("git", "pull", "-q", "origin", "main", cwd=work)
+        with open(os.path.join(work, ".gitattributes"), "w") as fh:
+            fh.write("*.html text eol=crlf\n")
+        run("git", "add", "-A", cwd=work); run("git", "commit", "-qm", "crlf", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        other = {**self.env, "CLAUDE_PLUGIN_DATA": os.path.realpath(tempfile.mkdtemp())}
+        publish(root, other, version="v2", seq=2, body="<p>two</p>\n")
+        push.main(other)
+        raw = subprocess.run(["git", "show", "main:pages/ExAmPlEiD123/v1/index.html"], cwd=bare,
+                             capture_output=True).stdout
+        self.assertEqual(raw, b"<p>lf</p>\n")
+
+    def test_commit_hook_that_rewrites_files_keeps_the_spool(self):
+        bare = make_vault()
+        hooks = os.path.realpath(tempfile.mkdtemp())
+        with open(os.path.join(hooks, "pre-commit"), "w") as fh:
+            fh.write("#!/bin/sh\nfor f in $(git diff --cached --name-only); do echo formatted > \"$f\"; git add \"$f\"; done\n")
+        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
+        publish(make_project(bare), self.env)
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                                          "GIT_CONFIG_VALUE_0": hooks}):
+            push.main(self.env)
+        self.assertFalse(self.state()["ok"])
+        self.assertEqual(len(self.spooled()), 1)
+
     def test_version_name_with_tmp_is_pushed(self):
         bare = make_vault()
         publish(make_project(bare), self.env, version="v1.tmp-final")
