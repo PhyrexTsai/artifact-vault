@@ -276,6 +276,20 @@ class PushTest(unittest.TestCase):
         self.assertTrue(self.state()["ok"], self.state())
         self.assertEqual(run("git", "log", "-1", "--format=%ae", "main", cwd=bare).strip(), "author@example.com")
 
+    def test_missing_name_alone_is_filled(self):
+        bare = make_vault()
+        publish(make_project(bare), self.env)
+        cfg = os.path.join(self.data, "email-only.gitconfig")
+        with open(cfg, "w") as fh:
+            fh.write("[user]\n\temail = someone@example.com\n\tuseConfigOnly = true\n")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update({"GIT_CONFIG_GLOBAL": cfg, "GIT_CONFIG_NOSYSTEM": "1",
+                    "CLAUDE_PLUGIN_DATA": self.data, "CLAUDE_PLUGIN_OPTION_AUTHOR_EMAIL": "author@example.com"})
+        with mock.patch.dict(os.environ, env, clear=True):
+            push.main(env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertEqual(run("git", "log", "-1", "--format=%ae", "main", cwd=bare).strip(), "someone@example.com")
+
     def test_lock_is_exclusive(self):
         path = os.path.join(self.data, "locks", "k.lock")
         with push.Lock(path) as a:
