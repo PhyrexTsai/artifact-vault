@@ -40,8 +40,11 @@ def git_env():
     return env
 
 
+NO_HOOKS = ["-c", f"core.hooksPath={os.devnull}"]  # see configure(): hooks never run in the vault clone
+
+
 def git(*args, cwd=None, timeout=GIT_TIMEOUT, inp=None):
-    r = subprocess.run(["git", *args], cwd=cwd, env=git_env(), capture_output=True, text=True,
+    r = subprocess.run(["git", *NO_HOOKS, *args], cwd=cwd, env=git_env(), capture_output=True, text=True,
                        timeout=timeout, input=inp)
     if r.returncode:
         raise RuntimeError(f"git {args[0]} failed: {(r.stderr or r.stdout).strip()[-300:]}")
@@ -128,19 +131,15 @@ def ensure_clone(url, clone):
     os.replace(tmp, clone)
 
 
-def no_hooks_dir(clone):
-    return os.path.join(clone, ".git", "artifact-vault-no-hooks")
-
-
 def configure(clone):
     # Store file names byte for byte. macOS git otherwise precomposes Unicode names, and the
     # archived HTML and meta.json would reference a spelling the commit does not have.
     git("config", "core.precomposeunicode", "false", cwd=clone)
     # This clone belongs to the plugin and only stores archives. Your global git hooks
-    # (formatters, checks) would rewrite archived pages here, so they do not run in it.
-    # Your own repositories are not affected.
-    os.makedirs(no_hooks_dir(clone), exist_ok=True)
-    git("config", "core.hooksPath", no_hooks_dir(clone), cwd=clone)
+    # (formatters, checks) would rewrite archived pages here, so they do not run in it: every
+    # git call also passes NO_HOOKS, which wins over environment settings. Your own
+    # repositories are not affected.
+    git("config", "core.hooksPath", os.devnull, cwd=clone)
     # Commits need an identity. Someone who set one only inside their project repos has none
     # here, so fall back to the plugin's author_email, in this clone only.
     author = os.environ.get("CLAUDE_PLUGIN_OPTION_AUTHOR_EMAIL", "").strip()
@@ -206,8 +205,8 @@ def commit_pages(clone, subject):
     """Stage pages/ past any .gitignore and commit if anything is staged."""
     git("add", "-f", "--", "pages", cwd=clone)
     staged = subprocess.run(["git", "diff", "--cached", "--quiet", "--", "pages"], cwd=clone, env=git_env())
-    if staged.returncode:  # -c: also wins over hooksPath set in the environment
-        git("-c", f"core.hooksPath={no_hooks_dir(clone)}", "commit", "--quiet", "-m", subject, cwd=clone)
+    if staged.returncode:
+        git("commit", "--quiet", "-m", subject, cwd=clone)
 
 
 def retire(folder, trash):
@@ -228,6 +227,19 @@ def blob_id(path, algo="sha1"):
     return hashlib.new(algo, b"blob %d\0" % len(data) + data).hexdigest()
 
 
+def inside_clone(clone, dest):
+    """Refuse to write through a symlink: a vault whose pages/ (or an artifact folder) links
+    elsewhere would otherwise make rmtree/copytree touch files outside the clone."""
+    root = os.path.realpath(clone)
+    path = root
+    for part in os.path.relpath(dest, clone).split(os.sep):
+        path = os.path.join(path, part)
+        if os.path.islink(path):
+            raise RuntimeError("the vault has a symlink under pages/; refusing to write through it")
+    if os.path.commonpath([root, os.path.realpath(dest)]) != root:
+        raise RuntimeError("archive path resolves outside the vault clone")
+
+
 def apply_version(clone, meta, folder):
     """Copy one version into pages/<id>/<version>/.
 
@@ -242,6 +254,7 @@ def apply_version(clone, meta, folder):
     algo = git("rev-parse", "--show-object-format", cwd=clone).strip() or "sha1"
     blobs = [blob_id(os.path.join(folder, *src.split("/")), algo) for src in sources]
     dest = os.path.join(clone, *rel.split("/"))
+    inside_clone(clone, dest)
     shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(folder, dest)
     return {f"{rel}/{src}": blob for src, blob in zip(sources, blobs)}

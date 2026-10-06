@@ -290,6 +290,35 @@ class PushTest(unittest.TestCase):
         self.assertTrue(self.state()["ok"], self.state())
         self.assertEqual(run("git", "log", "-1", "--format=%ae", "main", cwd=bare).strip(), "someone@example.com")
 
+    def test_symlinked_pages_in_vault_are_refused(self):
+        bare = make_vault()
+        work = os.path.join(os.path.dirname(bare), "seed")
+        outside = os.path.realpath(tempfile.mkdtemp())
+        os.makedirs(os.path.join(outside, "ExAmPlEiD123", "v1"))
+        with open(os.path.join(outside, "ExAmPlEiD123", "v1", "keep.txt"), "w") as fh:
+            fh.write("precious\n")
+        os.symlink(outside, os.path.join(work, "pages"))
+        run("git", "add", "-A", cwd=work); run("git", "commit", "-qm", "link", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        publish(make_project(bare), self.env)
+        push.main(self.env)
+        self.assertFalse(self.state()["ok"])
+        self.assertTrue(os.path.exists(os.path.join(outside, "ExAmPlEiD123", "v1", "keep.txt")))
+        self.assertEqual(len(self.spooled()), 1)
+
+    def test_pre_push_hook_from_environment_does_not_run(self):
+        bare = make_vault()
+        publish(make_project(bare), self.env)
+        d = os.path.realpath(tempfile.mkdtemp())
+        with open(os.path.join(d, "pre-push"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 1\n")
+        os.chmod(os.path.join(d, "pre-push"), 0o755)
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                                          "GIT_CONFIG_VALUE_0": d}):
+            push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
+
     def test_lock_is_exclusive(self):
         path = os.path.join(self.data, "locks", "k.lock")
         with push.Lock(path) as a:
