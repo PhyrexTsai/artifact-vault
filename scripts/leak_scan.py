@@ -60,7 +60,13 @@ def scan_paths_and_blobs(root, pats):
     hits, seen = [], set()
     objects = git("rev-list", "--objects", "HEAD", cwd=root).decode("utf-8", "replace").splitlines()
     named = [tuple(line.split(" ", 1)) for line in objects if " " in line]
-    for path in sorted({p for _, p in named}):
+    # Paths are checked per commit tree, separately from blob dedupe: rev-list names each
+    # blob once, so a rename that keeps the content would otherwise hide a private name.
+    paths = set()
+    for commit in git("rev-list", "HEAD", cwd=root).decode().split():
+        paths.update(git("ls-tree", "-r", "-z", "--name-only", commit, cwd=root).decode("utf-8", "replace").split("\0"))
+    paths.update(git("ls-files", "-z", cwd=root).decode("utf-8", "replace").split("\0"))
+    for path in sorted(p for p in paths if p):
         k = first_match(path, pats)
         if k is not None:
             hits.append(f"<redacted path> (path matches pattern #{k})")
@@ -85,9 +91,6 @@ def scan_paths_and_blobs(root, pats):
         if sha in seen:
             continue
         seen.add(sha)
-        k = first_match(path, pats)
-        if k is not None:
-            hits.append(f"<redacted path> (path matches pattern #{k})")
         scan_text(shown(path, pats), data, pats, hits)
     return hits
 

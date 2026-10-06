@@ -88,6 +88,26 @@ class LeakScanTest(unittest.TestCase):
         self.assertIn("<redacted path>", out)
         self.assertNotIn(SECRET, out.lower())
 
+    def test_rename_to_private_name_and_back_still_fails(self):
+        root = make_repo({"safe.txt": "same\n"})
+        os.rename(os.path.join(root, "safe.txt"), os.path.join(root, "ACME-Secret-Project.txt"))
+        commit(root, {})
+        os.rename(os.path.join(root, "ACME-Secret-Project.txt"), os.path.join(root, "safe.txt"))
+        commit(root, {})
+        code, out = scan(root)
+        self.assertEqual(code, 1)
+        self.assertIn("<redacted path>", out)
+        self.assertNotIn(SECRET, out.lower())
+
+    def test_staged_private_name_with_duplicate_content_fails(self):
+        root = make_repo({"safe.txt": "same\n"})
+        with open(os.path.join(root, "ACME-Secret-Project.txt"), "w") as fh:
+            fh.write("same\n")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+        code, out = scan(root)
+        self.assertEqual(code, 1)
+        self.assertIn("<redacted path>", out)
+
     def test_legacy_noreply_without_id_passes(self):
         code, out = scan(make_repo({"a.txt": "x\n"}, email="tester@users.noreply.github.com"))
         self.assertEqual(code, 0, out)
