@@ -152,6 +152,48 @@ class PushTest(unittest.TestCase):
         push.main(self.env)
         self.assertIn("pages/Img1/v1/logo.png", vault_files(bare))
 
+    def test_chinese_file_names_are_archived(self):
+        bare = make_vault()
+        root = make_project(bare)
+        with open(os.path.join(root, "圖.png"), "wb") as fh:
+            fh.write(b"\x89PNG")
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write("<img src='圖.png'>\n")
+        event = {"tool_name": "Artifact", "cwd": root,
+                 "tool_input": {"file_path": os.path.join(root, "index.html"), "files": {"圖.png": "圖.png"}},
+                 "tool_response": {"url": ARTIFACT + "Zh1", "title": "中文", "version": "v1", "seq": 1}}
+        with redirect_stdout(io.StringIO()):
+            capture.capture(event, env=self.env)
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertIn("pages/Zh1/v1/圖.png", set(run("git", "ls-tree", "-r", "-z", "--name-only", "main", cwd=bare).split("\0")))
+
+    def test_vault_ignoring_all_of_pages_still_archives(self):
+        bare = make_vault()
+        work = os.path.join(os.path.dirname(bare), "seed")
+        with open(os.path.join(work, ".gitignore"), "w") as fh:
+            fh.write("pages/\n")
+        run("git", "add", "-A", cwd=work); run("git", "commit", "-qm", "ignore pages", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        publish(make_project(bare), self.env)
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
+
+    def test_empty_vault_rejecting_first_push_is_retried(self):
+        bare = make_vault(empty=True)
+        hook = os.path.join(bare, "hooks", "pre-receive")
+        with open(hook, "w") as fh:
+            fh.write("#!/bin/sh\nexit 1\n")
+        os.chmod(hook, 0o755)
+        publish(make_project(bare), self.env)
+        push.main(self.env)
+        self.assertFalse(self.state()["ok"])
+        os.remove(hook)
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
+
     def test_failed_commit_is_recovered_before_pull(self):
         bare = make_vault()
         root = make_project(bare)

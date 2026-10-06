@@ -111,11 +111,11 @@ def queued_versions(spool):
 
 def ensure_clone(url, clone):
     if os.path.isdir(os.path.join(clone, ".git")):
+        if not git("ls-remote", "--heads", "origin", cwd=clone).strip():
+            return  # the vault has no branch yet: the first push creates it
         try:
-            git("pull", "--rebase", "--quiet", cwd=clone)
-        except RuntimeError as e:
-            if "no tracking information" in str(e) or "couldn't find remote ref" in str(e):
-                return  # empty remote: nothing to pull yet
+            git("pull", "--rebase", "--quiet", "origin", current_branch(clone), cwd=clone)
+        except RuntimeError:
             subprocess.run(["git", "rebase", "--abort"], cwd=clone, capture_output=True)
             raise
         return
@@ -124,6 +124,18 @@ def ensure_clone(url, clone):
     shutil.rmtree(tmp, ignore_errors=True)
     git("clone", "--quiet", url, tmp, timeout=CLONE_TIMEOUT)
     os.replace(tmp, clone)
+
+
+def current_branch(clone):
+    return git("symbolic-ref", "--short", "HEAD", cwd=clone).strip()
+
+
+def commit_pages(clone, subject):
+    """Stage pages/ past any .gitignore and commit if anything is staged."""
+    git("add", "-f", "--", "pages", cwd=clone)
+    staged = subprocess.run(["git", "diff", "--cached", "--quiet", "--", "pages"], cwd=clone, env=git_env())
+    if staged.returncode:
+        git("commit", "--quiet", "-m", subject, cwd=clone)
 
 
 def apply_version(clone, meta, folder):
@@ -141,9 +153,8 @@ def apply_version(clone, meta, folder):
 
 def recover(clone):
     """Commit pages/ changes a crashed or failed earlier run left in the clone."""
-    if git("status", "--porcelain", "--", "pages", cwd=clone).strip():
-        git("add", "-f", "--", "pages", cwd=clone)
-        git("commit", "--quiet", "-m", "archive: recovered versions", cwd=clone)
+    if os.path.isdir(os.path.join(clone, "pages")):
+        commit_pages(clone, "archive: recovered versions")
 
 
 def push_vault(data_dir, key):
@@ -164,12 +175,10 @@ def push_vault(data_dir, key):
         for meta, folder in queued:
             expected += apply_version(clone, meta, folder)
             titles.append(meta.get("title") or meta["id"])
-        if git("status", "--porcelain", "--", "pages", cwd=clone).strip():
-            git("add", "-f", "--", "pages", cwd=clone)  # -f: a .gitignore must not drop archived files
-            subject = f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles) or 'recovered'} versions"
-            git("commit", "--quiet", "-m", subject, cwd=clone)
         if expected:
-            tracked = set(git("ls-tree", "-r", "--name-only", "HEAD", "--", "pages", cwd=clone).split("\n"))
+            commit_pages(clone, f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles)} versions")
+            # -z: git would otherwise quote and escape non-ASCII paths such as Chinese file names
+            tracked = set(git("ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "pages", cwd=clone).split("\0"))
             missing = [p for p in expected if p not in tracked]
             if missing:
                 raise RuntimeError(f"{len(missing)} archived file(s) missing from the commit; spool kept")
@@ -195,7 +204,9 @@ def push(clone):
     try:
         git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
     except RuntimeError:
-        git("pull", "--rebase", "--quiet", cwd=clone)  # someone else pushed first
+        if not git("ls-remote", "--heads", "origin", cwd=clone).strip():
+            raise  # empty vault that rejected the first push: nothing to rebase onto
+        git("pull", "--rebase", "--quiet", "origin", current_branch(clone), cwd=clone)  # someone pushed first
         git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
 
 
