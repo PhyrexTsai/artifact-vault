@@ -172,7 +172,8 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(result, "queued")
         [spool] = self.spool_dirs()
         with open(os.path.join(spool, "meta.json")) as fh:
-            self.assertEqual(json.load(fh)["files"], ["assets", "deep/a.css"])
+            # sorted order decides which side of a clash is kept; the result is deterministic
+            self.assertEqual(json.load(fh)["files"], ["Deep", "assets"])
         self.assertIn("略過 4", msg["systemMessage"])
 
     def test_credential_in_file_name_blocks_capture(self):
@@ -198,6 +199,29 @@ class CaptureTest(unittest.TestCase):
             fh.write(PAGE + "<p>v2</p>\n")
         self.assertEqual(self.run_capture(publish_event(root, version=None))[0], "queued")
         self.assertEqual(len(self.spool_dirs()), 2)
+
+    def test_republish_keeps_unlisted_files_and_applies_removals(self):
+        root = make_project()
+        self.assertEqual(self.run_capture(publish_event(root))[0], "queued")
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write(PAGE + "<p>v2</p>\n")
+        self.assertEqual(self.run_capture(publish_event(root, files={}, version="v2", seq=2))[0], "queued")
+        v2 = [d for d in self.spool_dirs() if d.endswith("v2")][0]
+        self.assertTrue(os.path.isfile(os.path.join(v2, "diagrams", "d.html")))
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write(PAGE + "<p>v3</p>\n")
+        self.run_capture(publish_event(root, files={"diagrams/d.html": None}, version="v3", seq=3))
+        v3 = [d for d in self.spool_dirs() if d.endswith("v3")][0]
+        self.assertFalse(os.path.exists(os.path.join(v3, "diagrams", "d.html")))
+        with open(os.path.join(v3, "meta.json")) as fh:
+            self.assertEqual(json.load(fh)["files"], [])
+
+    def test_string_list_form(self):
+        root = make_project()
+        self.assertEqual(self.run_capture(publish_event(root, files=["diagrams/d.html"]))[0], "queued")
+        [spool] = self.spool_dirs()
+        with open(os.path.join(spool, "meta.json")) as fh:
+            self.assertEqual(json.load(fh)["files"], ["diagrams/d.html"])
 
     def test_list_form_and_server_copies(self):
         root = make_project()

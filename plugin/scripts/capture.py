@@ -85,28 +85,60 @@ def safe_published(path):
 
 
 def supporting_files(inp, cwd):
-    """Yield (published_path, source_path_or_None, problem_or_None) for tool_input.files."""
+    """Yield (published_path, change, source_path) for tool_input.files.
+
+    change is "set" (local source), "remove" (null), "remote" (copied from another
+    artifact on the server, no local source), or "bad" (unsafe path).
+    """
     files = inp.get("files")
     base = cwd
     if isinstance(inp.get("root"), str):
         base = os.path.join(cwd, os.path.expanduser(inp["root"]))
     items = []
     if isinstance(files, list):
-        items = [(f.get("path"), f.get("path")) if isinstance(f, dict) else (None, None) for f in files]
+        for f in files:
+            path = f if isinstance(f, str) else f.get("path") if isinstance(f, dict) else None
+            items.append((path, path))
     elif isinstance(files, dict):
-        for pub, src in files.items():
-            if isinstance(src, dict):
-                src = src.get("from")  # an {artifact, path} copy has no local source
-            items.append((pub, src))
+        items = list(files.items())
     for pub, src in items:
         clean = safe_published(pub)
         if clean is None:
-            yield None, None, "unsafe published path"
-            continue
-        if not isinstance(src, str):
-            yield clean, None, None  # removal or server-side copy: nothing local to keep
+            yield None, "bad", None
+        elif src is None:
+            yield clean, "remove", None
+        elif isinstance(src, dict) and not isinstance(src.get("from"), str):
+            yield clean, "remote", None
         else:
-            yield clean, os.path.normpath(src if os.path.isabs(src) else os.path.join(base, src)), None
+            src = src["from"] if isinstance(src, dict) else src
+            if not isinstance(src, str):
+                yield clean, "bad", None
+            else:
+                yield clean, "set", os.path.normpath(src if os.path.isabs(src) else os.path.join(base, src))
+
+
+def load_mirror(folder):
+    """Supporting files of the last captured version: {published_path: bytes}."""
+    found = {}
+    for d, _, names in os.walk(folder):
+        for n in names:
+            full = os.path.join(d, n)
+            with open(full, "rb") as fh:
+                found[os.path.relpath(full, folder).replace(os.sep, "/")] = fh.read()
+    return found
+
+
+def save_mirror(folder, extras):
+    tmp = folder + ".tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    for pub, data in extras:
+        dest = os.path.join(tmp, *pub.split("/"))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as fh:
+            fh.write(data)
+    shutil.rmtree(folder, ignore_errors=True)
+    os.replace(tmp, folder)
 
 
 def drop_conflicts(extras):
@@ -189,18 +221,27 @@ def capture(event, env=os.environ):
     if "vault:skip" in metas:
         return None
 
-    extras, problems = [], []
-    for pub, src, problem in supporting_files(inp, cwd):
-        if problem:
-            problems.append(problem)
-        elif src:
+    # A republish keeps every supporting file it does not list, so start from the files of
+    # the last captured version and apply this publish's changes.
+    state_dir = os.path.join(data_dir, "state", found["key"], art_id)
+    current, problems = load_mirror(os.path.join(state_dir, "files")), []
+    lowered = {k.lower(): k for k in current}
+    for pub, change, src in supporting_files(inp, cwd):
+        if change == "bad":
+            problems.append("unsafe published path")
+            continue
+        current.pop(lowered.pop(pub.lower(), pub), None)
+        if change == "set":
             try:
                 with open(src, "rb") as fh:
-                    extras.append((pub, fh.read()))
+                    current[pub] = fh.read()
+                lowered[pub.lower()] = pub
             except OSError:
                 problems.append(f"missing source for {pub}")
+        elif change == "remote":
+            problems.append(f"no local copy of {pub}")
 
-    extras, clashes = drop_conflicts(extras)
+    extras, clashes = drop_conflicts(sorted(current.items()))
     problems += ["path conflict"] * clashes
     title = str(res.get("title") or art_id)
     names = "\n".join(pub for pub, _ in extras).encode("utf-8")
@@ -210,8 +251,7 @@ def capture(event, env=os.environ):
             context=f"artifact-vault did not queue this page: it appears to contain a {kind}.")
         return "secret"
 
-    vault_key = found["key"]
-    state_path = os.path.join(data_dir, "state", vault_key, f"{art_id}.json")
+    state_path = os.path.join(state_dir, "state.json")
     dig = digest(main, extras)
     try:
         with open(state_path) as fh:
@@ -243,8 +283,9 @@ def capture(event, env=os.environ):
         "captured_at": now.isoformat(timespec="seconds"),
         "digest": dig,
     }
-    write_version(os.path.join(data_dir, "spool", vault_key, art_id, version), main, extras, meta)
-    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    write_version(os.path.join(data_dir, "spool", found["key"], art_id, version), main, extras, meta)
+    os.makedirs(state_dir, exist_ok=True)
+    save_mirror(os.path.join(state_dir, "files"), extras)
     with open(state_path, "w") as fh:
         json.dump({"digest": dig, "version": version}, fh)
 
