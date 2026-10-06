@@ -218,18 +218,21 @@ class PushTest(unittest.TestCase):
                              capture_output=True).stdout
         self.assertEqual(raw, b"<p>lf</p>\n")
 
-    def test_commit_hook_that_rewrites_files_keeps_the_spool(self):
+    def hooks(self, script):
+        d = os.path.realpath(tempfile.mkdtemp())
+        with open(os.path.join(d, "pre-commit"), "w") as fh:
+            fh.write("#!/bin/sh\n" + script)
+        os.chmod(os.path.join(d, "pre-commit"), 0o755)
+        return mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                                            "GIT_CONFIG_VALUE_0": d})
+
+    def test_global_hooks_do_not_run_in_the_private_clone(self):
         bare = make_vault()
-        hooks = os.path.realpath(tempfile.mkdtemp())
-        with open(os.path.join(hooks, "pre-commit"), "w") as fh:
-            fh.write("#!/bin/sh\nfor f in $(git diff --cached --name-only); do echo formatted > \"$f\"; git add \"$f\"; done\n")
-        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
         publish(make_project(bare), self.env)
-        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
-                                          "GIT_CONFIG_VALUE_0": hooks}):
+        with self.hooks('for f in $(git diff --cached --name-only); do echo formatted > "$f"; git add "$f"; done\n'):
             push.main(self.env)
-        self.assertFalse(self.state()["ok"])
-        self.assertEqual(len(self.spooled()), 1)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
 
     def test_quoted_file_name_is_archived(self):
         bare = make_vault()
@@ -326,18 +329,11 @@ class PushTest(unittest.TestCase):
         self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
         self.assertEqual(self.spooled(), [])
 
-    def test_failed_first_commit_can_be_retried(self):
+    def test_failing_global_hook_does_not_block_archiving(self):
         bare = make_vault(empty=True)
-        hooks = os.path.realpath(tempfile.mkdtemp())
-        with open(os.path.join(hooks, "pre-commit"), "w") as fh:
-            fh.write("#!/bin/sh\nfor f in $(git diff --cached --name-only); do echo x > \"$f\"; done\nexit 1\n")
-        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
         publish(make_project(bare), self.env)
-        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
-                                          "GIT_CONFIG_VALUE_0": hooks}):
+        with self.hooks("exit 1\n"):
             push.main(self.env)
-        self.assertFalse(self.state()["ok"])
-        push.main(self.env)
         self.assertTrue(self.state()["ok"], self.state())
         self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
 
@@ -347,23 +343,27 @@ class PushTest(unittest.TestCase):
         push.main(self.env)
         self.assertIn("pages/ExAmPlEiD123/v1.done-final/index.html", vault_files(bare))
 
-    def test_hook_rewriting_an_older_archive_is_undone(self):
+    def test_tampered_commit_is_still_caught_and_undone(self):
+        """Second line of defense: if anything rewrites an older archive during the commit."""
         bare = make_vault()
         root = make_project(bare)
         publish(root, self.env)
         push.main(self.env)
-        hooks = os.path.realpath(tempfile.mkdtemp())
-        with open(os.path.join(hooks, "pre-commit"), "w") as fh:
-            fh.write("#!/bin/sh\necho rewritten > pages/ExAmPlEiD123/v1/index.html\ngit add pages/ExAmPlEiD123/v1/index.html\n")
-        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
         publish(root, self.env, version="v2", seq=2, body="<p>two</p>\n")
-        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
-                                          "GIT_CONFIG_VALUE_0": hooks}):
+        real = push.commit_pages
+
+        def tamper(clone, subject):
+            real(clone, subject)
+            with open(os.path.join(clone, "pages", "ExAmPlEiD123", "v1", "index.html"), "w") as fh:
+                fh.write("rewritten\n")
+            run("git", "commit", "-q", "--amend", "-a", "--no-edit", cwd=clone)
+
+        with mock.patch.object(push, "commit_pages", side_effect=tamper):
             push.main(self.env)
         self.assertFalse(self.state()["ok"])
         self.assertEqual(len(self.spooled()), 1)
         self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
-        push.main(self.env)  # without the hook, the kept spool goes through
+        push.main(self.env)
         self.assertTrue(self.state()["ok"], self.state())
         self.assertIn("pages/ExAmPlEiD123/v2/index.html", vault_files(bare))
 

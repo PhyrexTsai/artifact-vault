@@ -128,10 +128,19 @@ def ensure_clone(url, clone):
     os.replace(tmp, clone)
 
 
+def no_hooks_dir(clone):
+    return os.path.join(clone, ".git", "artifact-vault-no-hooks")
+
+
 def configure(clone):
     # Store file names byte for byte. macOS git otherwise precomposes Unicode names, and the
     # archived HTML and meta.json would reference a spelling the commit does not have.
     git("config", "core.precomposeunicode", "false", cwd=clone)
+    # This clone belongs to the plugin and only stores archives. Your global git hooks
+    # (formatters, checks) would rewrite archived pages here, so they do not run in it.
+    # Your own repositories are not affected.
+    os.makedirs(no_hooks_dir(clone), exist_ok=True)
+    git("config", "core.hooksPath", no_hooks_dir(clone), cwd=clone)
     # Archive bytes as captured: no end-of-line conversion or filters from the vault's own
     # .gitattributes. info/attributes takes precedence over it.
     attrs = os.path.join(clone, ".git", "info", "attributes")
@@ -189,8 +198,8 @@ def commit_pages(clone, subject):
     """Stage pages/ past any .gitignore and commit if anything is staged."""
     git("add", "-f", "--", "pages", cwd=clone)
     staged = subprocess.run(["git", "diff", "--cached", "--quiet", "--", "pages"], cwd=clone, env=git_env())
-    if staged.returncode:
-        git("commit", "--quiet", "-m", subject, cwd=clone)
+    if staged.returncode:  # -c: also wins over hooksPath set in the environment
+        git("-c", f"core.hooksPath={no_hooks_dir(clone)}", "commit", "--quiet", "-m", subject, cwd=clone)
 
 
 def retire(folder, trash):
