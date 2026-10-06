@@ -182,9 +182,18 @@ def apply_version(clone, meta, folder):
 
 
 def recover(clone):
-    """Commit pages/ changes a crashed or failed earlier run left in the clone."""
-    if os.path.isdir(os.path.join(clone, "pages")):
-        commit_pages(clone, "archive: recovered versions")
+    """Throw away uncommitted pages/ changes an earlier run left behind.
+
+    The spool is deleted only after a commit that matches it, so anything uncommitted is
+    either still in the spool (and is applied again) or was never verified (a crashed run,
+    a hook that rewrote files). Committed but unpushed work is kept.
+    """
+    has_head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=clone, capture_output=True).returncode == 0
+    if has_head and git("ls-tree", "HEAD", "--", "pages", cwd=clone).strip():
+        git("restore", "-q", "--source=HEAD", "--staged", "--worktree", "--", "pages", cwd=clone)
+    else:
+        git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", "pages", cwd=clone)
+    git("clean", "-q", "-f", "-d", "-x", "--", "pages", cwd=clone)
 
 
 def push_vault(data_dir, key):
@@ -200,7 +209,7 @@ def push_vault(data_dir, key):
         if not lock.held:
             return {"skipped": "another session is pushing"}
         if os.path.isdir(os.path.join(clone, ".git")):
-            recover(clone)
+            recover(clone)  # before pull: a dirty tree would stop the rebase
         ensure_clone(url, clone)
         configure(clone)
         queued = queued_versions(spool)
@@ -210,6 +219,7 @@ def push_vault(data_dir, key):
             titles.append(meta.get("title") or meta["id"])
         if expected:
             commit_pages(clone, f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles)} versions")
+            git("checkout", "-q", "HEAD", "--", "pages", cwd=clone)  # undo any rewrite a hook left unstaged
             # -z: git would otherwise quote and escape non-ASCII paths such as Chinese file names
             committed = {}
             for entry in git("ls-tree", "-r", "-z", "HEAD", "--", "pages", cwd=clone).split("\0"):

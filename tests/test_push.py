@@ -294,7 +294,7 @@ class PushTest(unittest.TestCase):
         self.assertTrue(self.state()["ok"], self.state())
         self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
 
-    def test_failed_commit_is_recovered_before_pull(self):
+    def test_unverified_leftovers_are_discarded_not_pushed(self):
         bare = make_vault()
         root = make_project(bare)
         publish(root, self.env)
@@ -303,13 +303,32 @@ class PushTest(unittest.TestCase):
         os.makedirs(os.path.join(clone, "pages", "Left", "v1"))
         with open(os.path.join(clone, "pages", "Left", "v1", "index.html"), "w") as fh:
             fh.write("left behind\n")
-        run("git", "add", "-A", cwd=clone)  # staged but never committed
+        with open(os.path.join(clone, "pages", "ExAmPlEiD123", "v1", "index.html"), "w") as fh:
+            fh.write("changed by formatter\n")
+        run("git", "add", "pages/Left", cwd=clone)  # staged but never committed
         publish(root, self.env, version="v2", seq=2, body="<p>two</p>\n")
         push.main(self.env)
+        push.main(self.env)  # a second run must not commit the leftovers either
         self.assertTrue(self.state()["ok"], self.state())
         files = vault_files(bare)
-        self.assertIn("pages/Left/v1/index.html", files)
+        self.assertNotIn("pages/Left/v1/index.html", files)
         self.assertIn("pages/ExAmPlEiD123/v2/index.html", files)
+        self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
+
+    def test_hook_rewrite_left_unstaged_is_not_pushed_later(self):
+        bare = make_vault()
+        hooks = os.path.realpath(tempfile.mkdtemp())
+        with open(os.path.join(hooks, "pre-commit"), "w") as fh:
+            fh.write("#!/bin/sh\nfor f in $(git diff --cached --name-only); do echo formatted > \"$f\"; done\n")
+        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
+        root = make_project(bare)
+        publish(root, self.env)
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                                          "GIT_CONFIG_VALUE_0": hooks}):
+            push.main(self.env)
+            publish(root, self.env, version="v2", seq=2, body="<p>two</p>\n")
+            push.main(self.env)
+        self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
 
     def test_unreachable_vault_keeps_spool_and_records_error(self):
         root = make_project("/nonexistent/vault.git")
