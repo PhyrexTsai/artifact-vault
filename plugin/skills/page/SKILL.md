@@ -23,7 +23,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/vault_page.py" --data "${CLAUDE_PLUGIN_DA
 - Pick the type that matches the request (for example a plan → `dev-plan`). Use the user's words; ask only when two types fit equally well.
 - If no type fits, build the page without a template. Do not add a `vault:type` meta tag; the library files it as unsorted.
 
-## 3. Start from the template
+## 3. Start from the template (new pages only)
+
+Editing a page that already exists? Skip this step: edit the existing file in place, keep its sections, its `vault:type`, and any skip marker it has. `render` refuses to overwrite a file.
+
+For a new page:
 
 ```
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/vault_page.py" --data "${CLAUDE_PLUGIN_DATA}" render <type> <path/to/page.html>
@@ -55,4 +59,8 @@ The capture hook skips any page that contains `vault:skip`, anywhere in the file
 
 ## 6. Publish
 
-Publish with the Artifact tool as usual, including `files` for supporting files. The capture hook then reports "queued" (已排入書庫): the page is saved locally and pushed to the library in the background. Tell the user it is queued, not that it is already in the library, or that it was skipped.
+Publish with the Artifact tool as usual, including `files` for supporting files. Then report what the capture hook said, and only that:
+
+- It reported "queued" (已排入書庫): the page is saved locally and pushed to the library in the background. Say it is queued, not that it is already in the library.
+- It said the page looks like it holds a credential: say it was not archived and why.
+- The page carries the skip marker, or the hook said nothing: say it was not archived.

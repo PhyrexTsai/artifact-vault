@@ -150,6 +150,24 @@ class VaultPageTest(unittest.TestCase):
         self.assertTrue(fixed.lower().startswith("<!doctype html>"))
         self.assertIn('<head>\n<meta name="vault:type" content="plan">', fixed)
 
+    def test_render_never_overwrites_an_existing_page(self):
+        root = make_project(make_vault())
+        out = os.path.join(root, "page.html")
+        with open(out, "w") as fh:
+            fh.write('<meta name="vault:skip">\n<p>mine</p>\n')
+        with self.assertRaises(SystemExit):
+            vault_page.render("plan", out, root, self.env)
+        self.assertIn("mine", open(out).read())
+
+    def test_busy_vault_fails_cleanly_after_waiting(self):
+        root = make_project(make_vault())
+        vault_page.prepare(root, self.env, home=self.home)
+        key = os.listdir(os.path.join(self.data, "vaults"))[0]
+        with vault_page.push.Lock(os.path.join(self.data, "locks", f"{key}.lock")):
+            with self.assertRaises(vault_page.VaultBusy):
+                with vault_page.locked_vault(root, self.env, wait=0.3):
+                    pass
+
     def test_prepare_refreshes_templates(self):
         bare = make_vault()
         root = make_project(bare)

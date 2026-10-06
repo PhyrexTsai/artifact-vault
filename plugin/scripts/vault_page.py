@@ -32,24 +32,47 @@ def archify_available(home=None):
     return skill and shutil.which("node") is not None
 
 
-def vault_clone(cwd, env=os.environ):
-    """Clone or refresh the project's vault. Return (found, clone) or (None, None)."""
-    found = resolve.resolve(cwd)
-    if not found:
-        return None, None
-    data = env.get("CLAUDE_PLUGIN_DATA")
-    if not data:
-        raise SystemExit("artifact-vault: CLAUDE_PLUGIN_DATA is not set")
-    clone = os.path.join(data, "vaults", found["key"])
-    with push.Lock(os.path.join(data, "locks", f"{found['key']}.lock")) as lock:
-        if lock.held:  # a running push holds it otherwise; reading the current clone is fine
+class VaultBusy(Exception):
+    pass
+
+
+def locked_vault(cwd, env=os.environ, wait=15.0):
+    """Context manager: (found, clone) with the vault lock held, the clone refreshed.
+    Holding the lock while templates are read keeps a background push from swapping files
+    in between. Yields (None, None) when the project has no vault."""
+    import contextlib
+    import time
+
+    @contextlib.contextmanager
+    def cm():
+        found = resolve.resolve(cwd)
+        if not found:
+            yield None, None
+            return
+        data = env.get("CLAUDE_PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
+        if not data:
+            raise SystemExit("artifact-vault: CLAUDE_PLUGIN_DATA is not set")
+        clone = os.path.join(data, "vaults", found["key"])
+        deadline = time.monotonic() + wait
+        while True:
+            lock = push.Lock(os.path.join(data, "locks", f"{found['key']}.lock"))
+            lock.__enter__()
+            if lock.held:
+                break
+            lock.__exit__(None, None, None)
+            if time.monotonic() > deadline:
+                raise VaultBusy("the library is busy syncing; try again in a moment")
+            time.sleep(0.2)
+        try:
             if os.path.isdir(os.path.join(clone, ".git")):
                 push.recover(clone)
             push.ensure_clone(found["vault"], clone)
             push.configure(clone)
-    if not os.path.isdir(clone):
-        raise SystemExit("artifact-vault: the vault is not cloned yet; try again in a moment")
-    return found, clone
+            yield found, clone
+        finally:
+            lock.__exit__(None, None, None)
+
+    return cm()
 
 
 def vault_file(clone, rel):
@@ -77,10 +100,7 @@ def load_types(clone):
     return cfg, types
 
 
-def prepare(cwd, env=os.environ, home=None):
-    found, clone = vault_clone(cwd, env)
-    if not found:
-        return None
+def describe(found, clone, home=None):
     cfg, types = load_types(clone)
     tools = ["mermaid"] + (["archify"] if archify_available(home) else [])
     for t in types.values():
@@ -88,6 +108,11 @@ def prepare(cwd, env=os.environ, home=None):
     return {"vault": found["name"], "repo": found["repo"], "clone": clone, "types": types,
             "diagram_tools": tools, "css": vault_file(clone, cfg.get("css")),
             "logo": vault_file(clone, cfg.get("logo"))}
+
+
+def prepare(cwd, env=os.environ, home=None):
+    with locked_vault(cwd, env) as (found, clone):
+        return describe(found, clone, home) if found else None
 
 
 def add_type(page, kind):
@@ -103,24 +128,40 @@ def add_type(page, kind):
 
 
 def render(kind, out, cwd, env=os.environ):
-    info = prepare(cwd, env)
-    if not info:
-        raise SystemExit("NO_VAULT")
-    t = info["types"].get(kind)
-    if not t:
-        raise SystemExit(f"artifact-vault: no template '{kind}'. Available: {', '.join(info['types']) or 'none'}")
+    """Write a starter page for a new file. Never overwrites: an existing page is edited in
+    place, so its content and any skip marker survive."""
+    if os.path.exists(out):
+        raise SystemExit(f"artifact-vault: {out} already exists; edit it in place instead of rendering a new one")
     read = lambda p: open(p).read() if p and os.path.isfile(p) else ""
-    page = GUIDE.sub("", read(t["template"]), count=1)
-    page = page.replace("/*@@BASE_CSS@@*/", read(info["css"])).replace("<!--@@LOGO@@-->", read(info["logo"]).strip())
+    with locked_vault(cwd, env) as (found, clone):  # read every file while the lock is held
+        if not found:
+            raise SystemExit("NO_VAULT")
+        info = describe(found, clone)
+        t = info["types"].get(kind)
+        if not t:
+            raise SystemExit(f"artifact-vault: no template '{kind}'. Available: {', '.join(info['types']) or 'none'}")
+        template, css, logo = read(t["template"]), read(info["css"]), read(info["logo"]).strip()
+    if not template.strip():
+        raise SystemExit(f"artifact-vault: template '{kind}' is empty")
+    page = GUIDE.sub("", template, count=1)
+    page = page.replace("/*@@BASE_CSS@@*/", css).replace("<!--@@LOGO@@-->", logo)
     if capture.page_meta(page.encode()).get("vault:type", "").lower() != kind.lower():
         page = add_type(page, kind)
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    with open(out, "w") as fh:
+    with open(out, "x") as fh:  # x: fail rather than overwrite if it appeared meanwhile
         fh.write(page)
     return out
 
 
 def main(argv):
+    try:
+        return run_cli(argv)
+    except VaultBusy as e:
+        print(f"artifact-vault: {e}", file=sys.stderr)
+        return 1
+
+
+def run_cli(argv):
     # The Bash tool does not export CLAUDE_PLUGIN_DATA, so the skill passes it: --data <dir>
     if len(argv) >= 3 and argv[1] == "--data":
         if argv[2] and "${" not in argv[2]:
