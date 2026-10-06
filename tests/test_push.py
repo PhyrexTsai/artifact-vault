@@ -168,6 +168,31 @@ class PushTest(unittest.TestCase):
         self.assertTrue(self.state()["ok"], self.state())
         self.assertIn("pages/Zh1/v1/圖.png", set(run("git", "ls-tree", "-r", "-z", "--name-only", "main", cwd=bare).split("\0")))
 
+    def test_decomposed_unicode_name_is_archived(self):
+        bare = make_vault()
+        root = make_project(bare)
+        name = "cafe\u0301.png"
+        with open(os.path.join(root, name), "wb") as fh:
+            fh.write(b"\x89PNG")
+        with open(os.path.join(root, "index.html"), "w") as fh:
+            fh.write("<p>x</p>\n")
+        event = {"tool_name": "Artifact", "cwd": root,
+                 "tool_input": {"file_path": os.path.join(root, "index.html"), "files": {name: name}},
+                 "tool_response": {"url": ARTIFACT + "Nfd1", "title": "nfd", "version": "v1", "seq": 1}}
+        with redirect_stdout(io.StringIO()):
+            capture.capture(event, env=self.env)
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+
+    def test_lock_is_exclusive(self):
+        path = os.path.join(self.data, "locks", "k.lock")
+        with push.Lock(path) as a:
+            with push.Lock(path) as b:
+                self.assertTrue(a.held)
+                self.assertFalse(b.held)
+        with push.Lock(path) as c:
+            self.assertTrue(c.held)
+
     def test_vault_ignoring_all_of_pages_still_archives(self):
         bare = make_vault()
         work = os.path.join(os.path.dirname(bare), "seed")

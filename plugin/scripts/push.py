@@ -1,8 +1,7 @@
 """Stop / SessionStart hook: move queued versions from the spool into each vault and push.
 
 For every vault in ${CLAUDE_PLUGIN_DATA}/spool/<key>/:
-  1. Take a lock (mkdir; macOS has no flock). If another session holds it, stop: the next
-     turn tries again.
+  1. Take an OS file lock. If another session holds it, stop: the next turn tries again.
   2. Clone the vault the first time, or `pull --rebase` an existing clone. Git never prompts
      (GIT_TERMINAL_PROMPT=0, ssh BatchMode), so bad credentials fail instead of hanging.
   3. Copy each version into pages/<id>/<version>/ (its meta.json included). Push never
@@ -18,16 +17,16 @@ Writes the outcome to state/<key>-push.json for the setup skill and appends to l
 Never fails the session: errors are recorded and the hook exits 0.
 """
 import datetime
+import fcntl
 import json
 import os
 import shutil
 import subprocess
 import sys
-import time
+import unicodedata
 
 GIT_TIMEOUT = 120
 CLONE_TIMEOUT = 300
-LOCK_STALE = 15 * 60
 
 
 def now():
@@ -48,31 +47,27 @@ def git(*args, cwd=None, timeout=GIT_TIMEOUT):
 
 
 class Lock:
+    """OS file lock (fcntl.flock). The kernel releases it when the process dies, so a killed
+    run never leaves a stale lock and two runs can never both hold it."""
+
     def __init__(self, path):
-        self.path, self.held = path, False
+        self.path, self.held, self.fh = path, False, None
 
     def __enter__(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.fh = open(self.path, "a")
         try:
-            os.mkdir(self.path)
-        except FileExistsError:
-            try:
-                if time.time() - os.path.getmtime(self.path) > LOCK_STALE:
-                    os.rmdir(self.path)  # left behind by a killed run
-                    os.mkdir(self.path)
-                else:
-                    return self
-            except OSError:
-                return self
-        self.held = True
+            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.held = True
+        except OSError:
+            self.fh.close()
+            self.fh = None
         return self
 
     def __exit__(self, *exc):
-        if self.held:
-            try:
-                os.rmdir(self.path)
-            except OSError:
-                pass
+        if self.fh:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
+            self.fh.close()
 
 
 def read_json(path, default):
@@ -178,8 +173,9 @@ def push_vault(data_dir, key):
         if expected:
             commit_pages(clone, f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles)} versions")
             # -z: git would otherwise quote and escape non-ASCII paths such as Chinese file names
-            tracked = set(git("ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "pages", cwd=clone).split("\0"))
-            missing = [p for p in expected if p not in tracked]
+            nfc = lambda p: unicodedata.normalize("NFC", p)  # macOS git may precompose names
+            tracked = {nfc(p) for p in git("ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "pages", cwd=clone).split("\0")}
+            missing = [p for p in expected if nfc(p) not in tracked]
             if missing:
                 raise RuntimeError(f"{len(missing)} archived file(s) missing from the commit; spool kept")
         for _, folder in queued:  # only now: the commit holds their content
