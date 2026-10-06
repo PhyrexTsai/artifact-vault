@@ -70,6 +70,20 @@ class StatusTest(unittest.TestCase):
         self.assertIn("RuntimeError: offline", text)
         self.assertIn("Set the author email", text)
 
+    def test_committed_but_unpushed_pages_are_counted(self):
+        clone = os.path.join(self.data, "vaults", "k1")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+        subprocess.run(["git", "init", "-q", clone], check=True)
+        open(os.path.join(clone, "a.txt"), "w").close()
+        subprocess.run(["git", "add", "-A"], cwd=clone, check=True)
+        subprocess.run(["git", "commit", "-qm", "x"], cwd=clone, check=True, env=env)
+        os.makedirs(os.path.join(self.data, "state"))
+        with open(os.path.join(self.data, "state", "k1-push.json"), "w") as fh:
+            json.dump({"ok": False, "at": "t", "error": "offline"}, fh)
+        text = status(["--data", self.data, make_project()])
+        self.assertIn("1 commit(s) not pushed", text)
+
     def test_unsubstituted_data_dir_is_reported(self):
         text = status(["--data", "${CLAUDE_PLUGIN_DATA}", make_project()])
         self.assertIn("plugin data folder is unknown", text)

@@ -34,7 +34,7 @@ def plugin_version():
 
 
 def vaults(data):
-    """[(key, name, pending, last)] for every vault this machine has spooled or cloned."""
+    """[(key, name, pending, unpushed commits, last)] for every vault on this machine."""
     keys = set()
     for sub in ("spool", "vaults"):
         d = os.path.join(data, sub)
@@ -46,7 +46,12 @@ def vaults(data):
         name = push.read_json(os.path.join(spool, "vault.json"), {}).get("name") or key
         pending = len(push.queued_versions(spool)) if os.path.isdir(spool) else 0
         last = push.read_json(os.path.join(data, "state", f"{key}-push.json"), None)
-        rows.append((key, name, pending, last))
+        clone = os.path.join(data, "vaults", key)
+        try:  # committed after a failed push: the spool is already gone, the commit is not
+            unpushed = push.commits_to_push(clone) if os.path.isdir(os.path.join(clone, ".git")) else 0
+        except Exception:
+            unpushed = 0
+        rows.append((key, name, pending, unpushed, last))
     return rows
 
 
@@ -77,7 +82,7 @@ def report(cwd, data, author):
         rows = vaults(data)
         if not rows:
             lines.append("Queue: nothing archived on this machine yet")
-        for key, name, pending, last in rows:
+        for key, name, pending, unpushed, last in rows:
             if last is None:
                 state = "never pushed"
             elif last.get("ok"):
@@ -85,9 +90,10 @@ def report(cwd, data, author):
             else:
                 state = f"last push FAILED at {last.get('at')}: {last.get('error')}"
                 problems.append(f"{name}: {last.get('error')}")
-            lines.append(f"Vault {name}: {pending} waiting; {state}")
-            if pending and last and last.get("ok"):
-                problems.append(f"{name}: {pending} page(s) waiting; they are pushed at the end of the next turn.")
+            waiting = f"{pending} waiting" + (f", {unpushed} commit(s) not pushed" if unpushed else "")
+            lines.append(f"Vault {name}: {waiting}; {state}")
+            if (pending or unpushed) and last and last.get("ok"):
+                problems.append(f"{name}: pages are waiting; they are pushed at the end of the next turn.")
     return lines, problems
 
 
