@@ -303,6 +303,12 @@ class CaptureTest(unittest.TestCase):
         with open(os.path.join(spool, "meta.json")) as fh:
             self.assertEqual(json.load(fh)["files_written"], ["diagrams/d.html"])
 
+    def test_git_segments_in_names_are_dropped(self):
+        root = make_project()
+        result, msg = self.run_capture(publish_event(root, files={"docs/.git/config": "diagrams/d.html",
+                                                                   ".GIT/x": "diagrams/d.html"}))
+        self.assertIn("略過 2", msg["systemMessage"])
+
     def test_control_characters_in_names_are_dropped(self):
         root = make_project()
         result, msg = self.run_capture(publish_event(root, files={"a\nb.css": "diagrams/d.html"}))

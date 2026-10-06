@@ -104,8 +104,8 @@ def safe_published(path):
         return None
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in path):
         return None  # control characters (newlines, tabs) break tools that read path lists
-    if any(p in ("", ".", "..") for p in path.split("/")):
-        return None
+    if any(p in ("", ".", "..") or p.lower() == ".git" for p in path.split("/")):
+        return None  # .git segments cannot be stored in the vault's git tree
     return path
 
 
@@ -293,9 +293,13 @@ def capture(event, env=os.environ):
         "digest": dig,
     }
     vault_spool = os.path.join(data_dir, "spool", found["key"])
-    write_version(os.path.join(vault_spool, art_id, version), main, written, meta)
-    with open(os.path.join(vault_spool, "vault.json"), "w") as fh:  # tells push.py where to send it
+    os.makedirs(vault_spool, exist_ok=True)
+    route = os.path.join(vault_spool, "vault.json")  # tells push.py where to send it; written first
+    tmp = f"{route}.tmp{os.getpid()}"
+    with open(tmp, "w") as fh:
         json.dump({"vault": found["vault"], "name": found["name"]}, fh)
+    os.replace(tmp, route)
+    write_version(os.path.join(vault_spool, art_id, version), main, written, meta)
 
     note = f"（略過 {len(problems)} 個子檔案）" if problems else ""
     out(system=f"artifact-vault：已排入書庫 {found['name']}：「{title}」{note}",
