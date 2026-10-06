@@ -148,11 +148,11 @@ def configure(clone):
             missing = subprocess.run(["git", "config", key], cwd=clone, capture_output=True, env=git_env()).returncode
             if missing:  # fill each part on its own; keep whatever is already set
                 git("config", key, value, cwd=clone)
-    # Archive bytes as captured: no end-of-line conversion or filters from the vault's own
-    # .gitattributes. info/attributes takes precedence over it.
+    # Archive bytes as written: no end-of-line conversion, filters, or encoding changes from
+    # the vault's own .gitattributes, for pages and overrides alike. info/attributes wins.
     attrs = os.path.join(clone, ".git", "info", "attributes")
     os.makedirs(os.path.dirname(attrs), exist_ok=True)
-    rule = "pages/** -text -filter -ident -working-tree-encoding\n"
+    rule = "* -text -filter -ident -working-tree-encoding\n"  # the whole private clone
     current = open(attrs).read() if os.path.exists(attrs) else ""
     if rule not in current:
         with open(attrs, "a") as fh:

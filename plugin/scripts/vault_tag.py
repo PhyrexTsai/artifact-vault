@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import push  # noqa: E402
 import vault_page  # noqa: E402
 
-ID = re.compile(r"(?:/artifact/)?([A-Za-z0-9-]+)/?$")
+ID = re.compile(r"[A-Za-z0-9-]+")
+LINK = re.compile(r"/artifact/([A-Za-z0-9-]+)/?$")
 
 
 class TagError(Exception):
@@ -33,6 +34,8 @@ def artifacts(clone):
     if not os.path.isdir(pages):
         return found
     for art in sorted(os.listdir(pages)):
+        if not os.path.isdir(os.path.join(pages, art)):
+            continue  # e.g. pages/README.md
         metas = [push.read_json(os.path.join(pages, art, v, "meta.json"), None)
                  for v in sorted(os.listdir(os.path.join(pages, art))) if os.path.isdir(os.path.join(pages, art, v))]
         metas = [m for m in metas if isinstance(m, dict)]
@@ -54,10 +57,15 @@ def latest_override(clone, art):
 
 
 def parse_id(text):
-    m = ID.search(text.strip())
-    if not m:
-        raise TagError(f"not an artifact id or link: {text}")
-    return m.group(1)
+    """An artifact link, or a bare id matched in full (so a typo never selects another page)."""
+    text = text.strip()
+    if "/" in text:
+        m = LINK.search(text)
+        if m:
+            return m.group(1)
+    elif ID.fullmatch(text):
+        return text
+    raise TagError(f"not an artifact id or link: {text}")
 
 
 def set_type(cwd, ref, kind, author, env=os.environ):

@@ -129,6 +129,31 @@ class TagTest(unittest.TestCase):
         self.assertEqual(self.remote_override()["type"], "unsorted")
         self.assertEqual(vault_tag.list_artifacts(self.root, self.env)["Page1"]["type"], "unsorted")
 
+    def test_id_must_match_in_full(self):
+        for bad in ("bad_Page1", "x Page1", "Page1.."):
+            with self.assertRaises(vault_tag.TagError):
+                vault_tag.parse_id(bad)
+        self.assertEqual(vault_tag.parse_id(ARTIFACT + "Page1"), "Page1")
+        self.assertEqual(vault_tag.parse_id("Page1"), "Page1")
+
+    def test_files_directly_under_pages_are_ignored(self):
+        work = os.path.join(os.path.dirname(self.bare), "seed")
+        run("git", "pull", "-q", "origin", "main", cwd=work)
+        with open(os.path.join(work, "pages", "README.md"), "w") as fh:
+            fh.write("library\n")
+        run("git", "add", "-A", cwd=work); run("git", "commit", "-qm", "readme", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        self.assertIn("Page1", vault_tag.list_artifacts(self.root, self.env))
+
+    def test_json_encoding_attributes_do_not_break_tagging(self):
+        work = os.path.join(os.path.dirname(self.bare), "seed")
+        run("git", "pull", "-q", "origin", "main", cwd=work)
+        with open(os.path.join(work, ".gitattributes"), "w") as fh:
+            fh.write("*.json working-tree-encoding=UTF-16\n")
+        run("git", "add", ".gitattributes", cwd=work); run("git", "commit", "-qm", "attrs", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        self.assertIn("now research", vault_tag.set_type(self.root, "Page1", "research", "", self.env))
+
     def test_cli_exit_codes(self):
         out = io.StringIO()
         with redirect_stdout(out):
