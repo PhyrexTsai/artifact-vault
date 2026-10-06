@@ -27,6 +27,13 @@ class TagError(Exception):
     pass
 
 
+def vault_json(clone, *parts):
+    """Read JSON from inside the clone only: a symlink in the remote vault must not make the
+    tag skill read a local file (its title would go into a pushed commit message)."""
+    path = vault_page.vault_file(clone, "/".join(parts))
+    return push.read_json(path, None) if path else None
+
+
 def artifacts(clone):
     """{id: {title, type, versions, latest}} from pages/<id>/<version>/meta.json and overrides."""
     found = {}
@@ -36,8 +43,8 @@ def artifacts(clone):
     for art in sorted(os.listdir(pages)):
         if not os.path.isdir(os.path.join(pages, art)):
             continue  # e.g. pages/README.md
-        metas = [push.read_json(os.path.join(pages, art, v, "meta.json"), None)
-                 for v in sorted(os.listdir(os.path.join(pages, art))) if os.path.isdir(os.path.join(pages, art, v))]
+        metas = [vault_json(clone, "pages", art, ver, "meta.json")
+                 for ver in sorted(os.listdir(os.path.join(pages, art))) if os.path.isdir(os.path.join(pages, art, ver))]
         metas = [m for m in metas if isinstance(m, dict)]
         if not metas:
             continue
@@ -50,7 +57,7 @@ def artifacts(clone):
 
 def latest_override(clone, art):
     folder = os.path.join(clone, "overrides", art)
-    changes = [push.read_json(os.path.join(folder, n), None) for n in sorted(os.listdir(folder))] \
+    changes = [vault_json(clone, "overrides", art, n) for n in sorted(os.listdir(folder))] \
         if os.path.isdir(folder) else []
     changes = [c for c in changes if isinstance(c, dict) and c.get("type")]
     return max(changes, key=lambda c: (c.get("at") or "", c.get("id") or "")) if changes else {}

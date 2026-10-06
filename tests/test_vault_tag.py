@@ -154,6 +154,20 @@ class TagTest(unittest.TestCase):
         run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
         self.assertIn("now research", vault_tag.set_type(self.root, "Page1", "research", "", self.env))
 
+    def test_symlinked_meta_outside_the_clone_is_not_read(self):
+        outside = os.path.join(os.path.realpath(tempfile.mkdtemp()), "meta.json")
+        with open(outside, "w") as fh:
+            json.dump({"id": "Evil", "version": "v1", "title": "PRIVATE-TITLE", "type": "plan"}, fh)
+        work = os.path.join(os.path.dirname(self.bare), "seed")
+        run("git", "pull", "-q", "origin", "main", cwd=work)
+        os.makedirs(os.path.join(work, "pages", "Evil", "v1"))
+        os.symlink(outside, os.path.join(work, "pages", "Evil", "v1", "meta.json"))
+        run("git", "add", "-A", cwd=work); run("git", "commit", "-qm", "link", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        rows = vault_tag.list_artifacts(self.root, self.env)
+        self.assertNotIn("Evil", rows)
+        self.assertNotIn("PRIVATE-TITLE", json.dumps(rows))
+
     def test_cli_exit_codes(self):
         out = io.StringIO()
         with redirect_stdout(out):
