@@ -262,6 +262,20 @@ class PushTest(unittest.TestCase):
         push.main(self.env)
         self.assertIn("pages/ExAmPlEiD123/v1.tmp-final/index.html", vault_files(bare))
 
+    def test_identity_falls_back_to_author_email(self):
+        bare = make_vault()
+        publish(make_project(bare), self.env)
+        empty_cfg = os.path.join(self.data, "empty.gitconfig")
+        with open(empty_cfg, "w") as fh:
+            fh.write("[user]\n\tuseConfigOnly = true\n")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update({"GIT_CONFIG_GLOBAL": empty_cfg, "GIT_CONFIG_NOSYSTEM": "1",
+                    "CLAUDE_PLUGIN_DATA": self.data, "CLAUDE_PLUGIN_OPTION_AUTHOR_EMAIL": "author@example.com"})
+        with mock.patch.dict(os.environ, env, clear=True):
+            push.main(env)
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertEqual(run("git", "log", "-1", "--format=%ae", "main", cwd=bare).strip(), "author@example.com")
+
     def test_lock_is_exclusive(self):
         path = os.path.join(self.data, "locks", "k.lock")
         with push.Lock(path) as a:

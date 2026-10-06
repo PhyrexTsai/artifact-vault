@@ -141,6 +141,13 @@ def configure(clone):
     # Your own repositories are not affected.
     os.makedirs(no_hooks_dir(clone), exist_ok=True)
     git("config", "core.hooksPath", no_hooks_dir(clone), cwd=clone)
+    # Commits need an identity. Someone who set one only inside their project repos has none
+    # here, so fall back to the plugin's author_email, in this clone only.
+    author = os.environ.get("CLAUDE_PLUGIN_OPTION_AUTHOR_EMAIL", "").strip()
+    has_email = subprocess.run(["git", "config", "user.email"], cwd=clone, capture_output=True, env=git_env())
+    if has_email.returncode and author:
+        git("config", "user.email", author, cwd=clone)
+        git("config", "user.name", author.split("@")[0], cwd=clone)
     # Archive bytes as captured: no end-of-line conversion or filters from the vault's own
     # .gitattributes. info/attributes takes precedence over it.
     attrs = os.path.join(clone, ".git", "info", "attributes")
