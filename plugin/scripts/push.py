@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 GIT_TIMEOUT = 120
 CLONE_TIMEOUT = 300
@@ -97,9 +98,6 @@ def queued_versions(spool):
             continue
         for ver in sorted(os.listdir(art_dir)):
             folder = os.path.join(art_dir, ver)
-            if ".done" in ver and os.path.isdir(folder):
-                shutil.rmtree(folder, ignore_errors=True)  # a retire() that was interrupted
-                continue
             meta = read_json(os.path.join(folder, "meta.json"), None)
             if not isinstance(meta, dict) or meta.get("id") != art or meta.get("version") != ver:
                 continue  # a temp folder of a running capture, or not a version at all
@@ -149,6 +147,43 @@ def current_branch(clone):
     return git("symbolic-ref", "--short", "HEAD", cwd=clone).strip()
 
 
+def head(clone):
+    r = subprocess.run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=clone, capture_output=True, text=True)
+    return r.stdout.strip() or None
+
+
+def check_commit(clone, before, expected):
+    """The new commit must change exactly the expected files, with exactly the captured bytes.
+
+    Anything else means a git hook or filter touched the archive (this round's files or
+    older versions), so the commit cannot be trusted.
+    """
+    if head(clone) == before:
+        return "nothing was committed"
+    git("checkout", "-q", "HEAD", "--", "pages", cwd=clone)  # drop rewrites a hook left unstaged
+    committed = {}  # -z: git would otherwise quote non-ASCII paths such as Chinese names
+    for entry in git("ls-tree", "-r", "-z", "HEAD", "--", "pages", cwd=clone).split("\0"):
+        if "\t" in entry:
+            info, path = entry.split("\t", 1)
+            committed[path] = info.split()[2]
+    if any(committed.get(p) != sha for p, sha in expected.items()):
+        return "archived files missing or changed in the commit"
+    diff = ["diff", "--name-only", "-z", "--no-renames", before, "HEAD", "--"] if before else \
+        ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--"]
+    touched = {p for p in git(*diff, cwd=clone).split("\0") if p}
+    if touched - set(expected):
+        return "the commit changed files outside this round's versions"
+    return None
+
+
+def undo_commit(clone, before):
+    if before:
+        git("reset", "-q", "--hard", before, cwd=clone)
+    else:
+        git("update-ref", "-d", "HEAD", cwd=clone)
+        git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ".", cwd=clone)
+
+
 def commit_pages(clone, subject):
     """Stage pages/ past any .gitignore and commit if anything is staged."""
     git("add", "-f", "--", "pages", cwd=clone)
@@ -157,10 +192,12 @@ def commit_pages(clone, subject):
         git("commit", "--quiet", "-m", subject, cwd=clone)
 
 
-def retire(folder):
-    """Leave the queue atomically, then delete. A rename is all-or-nothing, so an interrupted
-    delete can never leave a partial folder that still looks like a complete version."""
-    gone = f"{folder}.done{os.getpid()}"
+def retire(folder, trash):
+    """Leave the queue atomically, then delete. The rename moves the folder out of the spool
+    in one step, so an interrupted delete can never leave a partial folder that still looks
+    like a complete version."""
+    os.makedirs(trash, exist_ok=True)
+    gone = os.path.join(trash, f"{os.getpid()}-{time.time_ns()}")
     os.replace(folder, gone)
     shutil.rmtree(gone, ignore_errors=True)
 
@@ -229,19 +266,16 @@ def push_vault(data_dir, key):
             expected.update(apply_version(clone, meta, folder))
             titles.append(meta.get("title") or meta["id"])
         if expected:
+            before = head(clone)
             commit_pages(clone, f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles)} versions")
-            git("checkout", "-q", "HEAD", "--", "pages", cwd=clone)  # undo any rewrite a hook left unstaged
-            # -z: git would otherwise quote and escape non-ASCII paths such as Chinese file names
-            committed = {}
-            for entry in git("ls-tree", "-r", "-z", "HEAD", "--", "pages", cwd=clone).split("\0"):
-                if "\t" in entry:
-                    info, path = entry.split("\t", 1)
-                    committed[path] = info.split()[2]
-            bad = [p for p, sha in expected.items() if committed.get(p) != sha]
-            if bad:
-                raise RuntimeError(f"{len(bad)} archived file(s) missing or changed in the commit; spool kept")
+            problem = check_commit(clone, before, expected)
+            if problem:
+                undo_commit(clone, before)
+                raise RuntimeError(f"{problem}; commit undone, spool kept")
+        trash = os.path.join(data_dir, "trash")
+        shutil.rmtree(trash, ignore_errors=True)  # leftovers of an interrupted retire()
         for _, folder in queued:  # only now: the commit holds their content
-            retire(folder)
+            retire(folder, trash)
         ahead = commits_to_push(clone)
         if ahead:
             push(clone)

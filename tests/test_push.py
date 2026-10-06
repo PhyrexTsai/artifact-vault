@@ -341,6 +341,32 @@ class PushTest(unittest.TestCase):
         self.assertTrue(self.state()["ok"], self.state())
         self.assertIn("pages/ExAmPlEiD123/v1/index.html", vault_files(bare))
 
+    def test_version_name_with_done_is_pushed(self):
+        bare = make_vault()
+        publish(make_project(bare), self.env, version="v1.done-final")
+        push.main(self.env)
+        self.assertIn("pages/ExAmPlEiD123/v1.done-final/index.html", vault_files(bare))
+
+    def test_hook_rewriting_an_older_archive_is_undone(self):
+        bare = make_vault()
+        root = make_project(bare)
+        publish(root, self.env)
+        push.main(self.env)
+        hooks = os.path.realpath(tempfile.mkdtemp())
+        with open(os.path.join(hooks, "pre-commit"), "w") as fh:
+            fh.write("#!/bin/sh\necho rewritten > pages/ExAmPlEiD123/v1/index.html\ngit add pages/ExAmPlEiD123/v1/index.html\n")
+        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
+        publish(root, self.env, version="v2", seq=2, body="<p>two</p>\n")
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                                          "GIT_CONFIG_VALUE_0": hooks}):
+            push.main(self.env)
+        self.assertFalse(self.state()["ok"])
+        self.assertEqual(len(self.spooled()), 1)
+        self.assertEqual(run("git", "show", "main:pages/ExAmPlEiD123/v1/index.html", cwd=bare), "<p>hello</p>\n")
+        push.main(self.env)  # without the hook, the kept spool goes through
+        self.assertTrue(self.state()["ok"], self.state())
+        self.assertIn("pages/ExAmPlEiD123/v2/index.html", vault_files(bare))
+
     def test_hook_rewrite_left_unstaged_is_not_pushed_later(self):
         bare = make_vault()
         hooks = os.path.realpath(tempfile.mkdtemp())
