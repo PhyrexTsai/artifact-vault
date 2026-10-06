@@ -38,8 +38,9 @@ def git_env():
     return env
 
 
-def git(*args, cwd=None, timeout=GIT_TIMEOUT):
-    r = subprocess.run(["git", *args], cwd=cwd, env=git_env(), capture_output=True, text=True, timeout=timeout)
+def git(*args, cwd=None, timeout=GIT_TIMEOUT, inp=None):
+    r = subprocess.run(["git", *args], cwd=cwd, env=git_env(), capture_output=True, text=True,
+                       timeout=timeout, input=inp)
     if r.returncode:
         raise RuntimeError(f"git {args[0]} failed: {(r.stderr or r.stdout).strip()[-300:]}")
     return r.stdout
@@ -96,8 +97,8 @@ def queued_versions(spool):
         for ver in sorted(os.listdir(art_dir)):
             folder = os.path.join(art_dir, ver)
             meta = read_json(os.path.join(folder, "meta.json"), None)
-            if ".tmp" in ver or not isinstance(meta, dict) or meta.get("id") != art:
-                continue  # half-written by a running capture
+            if not isinstance(meta, dict) or meta.get("id") != art or meta.get("version") != ver:
+                continue  # a temp folder of a running capture, or not a version at all
             found.append((meta, folder))
     found.sort(key=lambda mf: (mf[0].get("seq") or 0, mf[0].get("captured_at") or ""))
     return found
@@ -124,6 +125,15 @@ def configure(clone):
     # Store file names byte for byte. macOS git otherwise precomposes Unicode names, and the
     # archived HTML and meta.json would reference a spelling the commit does not have.
     git("config", "core.precomposeunicode", "false", cwd=clone)
+    # Archive bytes as captured: no end-of-line conversion or filters from the vault's own
+    # .gitattributes. info/attributes takes precedence over it.
+    attrs = os.path.join(clone, ".git", "info", "attributes")
+    os.makedirs(os.path.dirname(attrs), exist_ok=True)
+    rule = "pages/** -text -filter -ident -working-tree-encoding\n"
+    current = open(attrs).read() if os.path.exists(attrs) else ""
+    if rule not in current:
+        with open(attrs, "a") as fh:
+            fh.write(rule)
 
 
 def current_branch(clone):
@@ -179,10 +189,16 @@ def push_vault(data_dir, key):
         if expected:
             commit_pages(clone, f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles)} versions")
             # -z: git would otherwise quote and escape non-ASCII paths such as Chinese file names
-            tracked = set(git("ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "pages", cwd=clone).split("\0"))
-            missing = [p for p in expected if p not in tracked]
-            if missing:
-                raise RuntimeError(f"{len(missing)} archived file(s) missing from the commit; spool kept")
+            committed = {}
+            for entry in git("ls-tree", "-r", "-z", "HEAD", "--", "pages", cwd=clone).split("\0"):
+                if "\t" in entry:
+                    info, path = entry.split("\t", 1)
+                    committed[path] = info.split()[2]
+            want = git("hash-object", "--no-filters", "--stdin-paths", cwd=clone,
+                       inp="\n".join(expected) + "\n").split()
+            bad = [p for p, sha in zip(expected, want) if committed.get(p) != sha]
+            if bad:
+                raise RuntimeError(f"{len(bad)} archived file(s) missing or changed in the commit; spool kept")
         for _, folder in queued:  # only now: the commit holds their content
             shutil.rmtree(folder, ignore_errors=True)
         ahead = commits_to_push(clone)

@@ -186,6 +186,26 @@ class PushTest(unittest.TestCase):
         tree = set(run("git", "ls-tree", "-r", "-z", "--name-only", "main", cwd=bare).split("\0"))
         self.assertIn(f"pages/Nfd1/v1/{name}", tree)  # exact spelling the page references
 
+    def test_vault_gitattributes_cannot_rewrite_archived_bytes(self):
+        bare = make_vault()
+        work = os.path.join(os.path.dirname(bare), "seed")
+        with open(os.path.join(work, ".gitattributes"), "w") as fh:
+            fh.write("*.html text eol=lf\n")
+        run("git", "add", "-A", cwd=work); run("git", "commit", "-qm", "attrs", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        publish(make_project(bare), self.env, body="<p>a</p>\r\n<p>b</p>\r\n")
+        push.main(self.env)
+        self.assertTrue(self.state()["ok"], self.state())
+        raw = subprocess.run(["git", "show", "main:pages/ExAmPlEiD123/v1/index.html"], cwd=bare,
+                             capture_output=True).stdout
+        self.assertIn(b"\r\n", raw)
+
+    def test_version_name_with_tmp_is_pushed(self):
+        bare = make_vault()
+        publish(make_project(bare), self.env, version="v1.tmp-final")
+        push.main(self.env)
+        self.assertIn("pages/ExAmPlEiD123/v1.tmp-final/index.html", vault_files(bare))
+
     def test_lock_is_exclusive(self):
         path = os.path.join(self.data, "locks", "k.lock")
         with push.Lock(path) as a:
