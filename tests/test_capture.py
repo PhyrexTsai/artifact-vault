@@ -109,6 +109,20 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(self.run_capture(publish_event(root, files={})), (None, None))
         self.assertEqual(self.spool_dirs(), [])
 
+    def test_vault_skip_far_down_the_page_is_honored(self):
+        big = "<style>" + ("a{color:red}" * 2000) + "</style>\n<meta name=\"vault:skip\">\n"
+        root = make_project(files={"index.html": big})
+        self.assertEqual(self.run_capture(publish_event(root, files={}))[0], None)
+
+    def test_unquoted_vault_skip_is_honored(self):
+        root = make_project(files={"index.html": "<meta name=vault:skip>\n<p>x</p>\n"})
+        self.assertEqual(self.run_capture(publish_event(root, files={}))[0], None)
+
+    def test_vault_skip_inside_comment_or_script_is_ignored(self):
+        page = '<!-- <meta name="vault:skip"> -->\n<script>var s = \'<meta name="vault:skip">\';</script>\n<p>x</p>\n'
+        root = make_project(files={"index.html": page})
+        self.assertEqual(self.run_capture(publish_event(root, files={}))[0], "queued")
+
     def test_no_config_is_skipped(self):
         root = make_project(config=False)
         self.assertEqual(self.run_capture(publish_event(root)), (None, None))

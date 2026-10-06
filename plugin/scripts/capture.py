@@ -17,14 +17,12 @@ import os
 import re
 import shutil
 import sys
+from html.parser import HTMLParser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import resolve  # noqa: E402
 
-HEAD_BYTES = 8192
-META_TYPE = re.compile(
-    r"""<meta\b(?=[^>]*\bname\s*=\s*["']vault:type["'])[^>]*\bcontent\s*=\s*["']([A-Za-z0-9_-]+)["']""", re.I)
-META_SKIP = re.compile(r"""<meta\b[^>]*\bname\s*=\s*["']vault:skip["']""", re.I)
+TYPE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 ARTIFACT_ID = re.compile(r"/artifact/([A-Za-z0-9-]+)/?$")
 
 # Credential shapes. Only the kind is ever reported, never the match.
@@ -37,6 +35,34 @@ SECRETS = [
     ("Google API key", re.compile(rb"\bAIza[0-9A-Za-z_-]{35}\b")),
     ("private key", re.compile(rb"-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----")),
 ]
+
+
+class _Meta(HTMLParser):
+    """Collect <meta name=... content=...> from real elements; comments and scripts are ignored."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.found = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "meta":
+            a = {k.lower(): (v or "") for k, v in attrs}
+            name = a.get("name", "").strip().lower()
+            if name.startswith("vault:") and name not in self.found:
+                self.found[name] = a.get("content", "").strip()
+
+    handle_startendtag = handle_starttag
+
+
+def page_meta(html_bytes):
+    """vault:* meta tags anywhere in the document."""
+    parser = _Meta()
+    try:
+        parser.feed(html_bytes.decode("utf-8", "replace"))
+        parser.close()
+    except Exception:  # malformed HTML: keep what was found so far
+        pass
+    return parser.found
 
 
 def out(system=None, context=None):
@@ -141,8 +167,8 @@ def capture(event, env=os.environ):
     main_path = inp["file_path"]
     with open(main_path if os.path.isabs(main_path) else os.path.join(cwd, main_path), "rb") as fh:
         main = fh.read()
-    head = main[:HEAD_BYTES].decode("utf-8", "replace")
-    if META_SKIP.search(head):
+    metas = page_meta(main)
+    if "vault:skip" in metas:
         return None
 
     extras, problems = [], []
@@ -177,7 +203,7 @@ def capture(event, env=os.environ):
 
     now = datetime.datetime.now(datetime.timezone.utc)
     version = re.sub(r"[^A-Za-z0-9._-]", "-", str(res.get("version") or "")).strip(".") or now.strftime("%Y%m%dT%H%M%SZ")
-    m_type = META_TYPE.search(head)
+    page_type = metas.get("vault:type", "").lower()
     caps = inp.get("capabilities")
     meta = {
         "id": art_id,
@@ -188,7 +214,7 @@ def capture(event, env=os.environ):
         "audience": res.get("audience"),
         "author": env.get("CLAUDE_PLUGIN_OPTION_AUTHOR_EMAIL") or None,
         "repo": found["repo"],
-        "type": m_type.group(1).lower() if m_type else "unsorted",
+        "type": page_type if TYPE_NAME.match(page_type) else "unsorted",
         "files": sorted(pub for pub, _ in extras),
         "capabilities": sorted(caps.keys()) if isinstance(caps, dict) else [],
         "agent_type": event.get("agent_type"),
