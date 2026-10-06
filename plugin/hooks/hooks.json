@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Artifact",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/capture.py" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "async": true, "command": "sh \"${CLAUDE_PLUGIN_ROOT}\"/scripts/push.sh" }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "async": true, "command": "sh \"${CLAUDE_PLUGIN_ROOT}\"/scripts/push.sh" }
+        ]
+      }
+    ]
+  }
+}

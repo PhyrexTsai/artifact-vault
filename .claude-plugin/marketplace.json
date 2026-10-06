@@ -1,0 +1,14 @@
+{
+  "name": "artifact-vault",
+  "owner": {
+    "name": "Phyrex Tsai"
+  },
+  "description": "Plugins for archiving Claude Code artifacts.",
+  "plugins": [
+    {
+      "name": "artifact-vault",
+      "source": "./plugin",
+      "description": "Archive published Claude Code artifacts into a git-backed library repo."
+    }
+  ]
+}
