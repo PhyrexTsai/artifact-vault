@@ -12,6 +12,7 @@ Never fails the session: unexpected errors go to stderr and the hook exits 0.
 """
 import datetime
 import hashlib
+import html
 import json
 import os
 import re
@@ -224,9 +225,9 @@ def capture(event, env=os.environ):
     main_path = inp["file_path"]
     with open(main_path if os.path.isabs(main_path) else os.path.join(cwd, main_path), "rb") as fh:
         main = fh.read()
+    if SKIP_TOKEN.search(main) or SKIP_TOKEN.search(html.unescape(main.decode("utf-8", "replace")).encode()):
+        return None  # raw or entity-encoded token, found without depending on parser state
     metas = page_meta(main)
-    if SKIP_TOKEN.search(main) or "vault:skip" in metas:  # raw token, or an encoded form the parser decoded
-        return None
 
     # Store only what this publish changed. A republish keeps the files it does not list,
     # so the full file set of a version is rebuilt later by replaying versions in seq order

@@ -142,6 +142,10 @@ class CaptureTest(unittest.TestCase):
         root = make_project(files={"index.html": '<meta name="vault&#58;skip">\n'})
         self.assertIsNone(self.run_capture(publish_event(root, files={}))[0])
 
+    def test_encoded_skip_after_confusing_markup_is_honored(self):
+        root = make_project(files={"index.html": '<textarea><script></textarea><meta name="vault&#58;skip">\n'})
+        self.assertIsNone(self.run_capture(publish_event(root, files={}))[0])
+
     def test_unicode_equivalent_names_clash(self):
         kept, dropped = capture.drop_conflicts([("caf\u00e9.txt", b"a"), ("cafe\u0301.txt", b"b")])
         self.assertEqual(dropped, 1)
