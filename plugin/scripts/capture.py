@@ -4,8 +4,8 @@ Runs synchronously, so it only copies local files into a spool folder and writes
 version meta file. It never clones, commits, or uses the network; push.sh does that later.
 
 Skips quietly when: the call is not a publish (quickstart, read, list, ...), it uploads an
-asset, it has no file_path, the project has no vault, or the page carries
-<meta name="vault:skip">. Skips with a message when the page looks like it contains a
+asset, it has no file_path, the project has no vault, or the page contains the token
+vault:skip anywhere (fail closed: a page that only shows the token is skipped too). Skips with a message when the page looks like it contains a
 credential. Every other publish is kept; duplicates are dropped at push time, in seq order.
 
 Never fails the session: unexpected errors go to stderr and the hook exits 0.
@@ -24,6 +24,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import resolve  # noqa: E402
 
 TYPE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+# Fail closed: the skip token anywhere in the page skips it, even inside a comment or as
+# text. A parser that misreads some markup could otherwise archive a page the user excluded.
+SKIP_TOKEN = re.compile(rb"vault:skip", re.I)
 ARTIFACT_ID = re.compile(r"/artifact/([A-Za-z0-9-]+)/?$")
 
 # Credential shapes. Only the kind is ever reported, never the match.
@@ -214,9 +217,9 @@ def capture(event, env=os.environ):
     main_path = inp["file_path"]
     with open(main_path if os.path.isabs(main_path) else os.path.join(cwd, main_path), "rb") as fh:
         main = fh.read()
-    metas = page_meta(main)
-    if "vault:skip" in metas:
+    if SKIP_TOKEN.search(main):
         return None
+    metas = page_meta(main)
 
     # Store only what this publish changed. A republish keeps the files it does not list,
     # so the full file set of a version is rebuilt later by replaying versions in seq order

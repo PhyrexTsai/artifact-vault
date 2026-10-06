@@ -118,15 +118,16 @@ class CaptureTest(unittest.TestCase):
         root = make_project(files={"index.html": "<meta name=vault:skip>\n<p>x</p>\n"})
         self.assertEqual(self.run_capture(publish_event(root, files={}))[0], None)
 
-    def test_vault_skip_inside_comment_or_script_is_ignored(self):
-        page = '<!-- <meta name="vault:skip"> -->\n<script>var s = \'<meta name="vault:skip">\';</script>\n<p>x</p>\n'
-        root = make_project(files={"index.html": page})
-        self.assertEqual(self.run_capture(publish_event(root, files={}))[0], "queued")
+    def test_skip_token_anywhere_skips_fail_closed(self):
+        for page in ['<!-- <meta name="vault:skip"> -->\n<p>x</p>\n',
+                     '<textarea><script></textarea><meta name="vault:skip">\n',
+                     '<textarea><style></textarea><meta name=vault:skip>\n']:
+            root = make_project(files={"index.html": page})
+            self.assertIsNone(self.run_capture(publish_event(root, files={}))[0], page)
 
-    def test_markers_shown_as_text_are_ignored(self):
-        page = '<title><meta name="vault:skip"></title><textarea><meta name="vault:skip"></textarea>\n<p>x</p>\n'
-        root = make_project(files={"index.html": page})
-        self.assertEqual(self.run_capture(publish_event(root, files={}))[0], "queued")
+    def test_type_shown_as_text_is_not_read(self):
+        page = '<textarea><meta name="vault:type" content="wrong"></textarea>\n<meta name="vault:type" content="research">\n'
+        self.assertEqual(capture.page_meta(page.encode())["vault:type"], "research")
 
     def test_tag_text_inside_textarea_does_not_hide_a_real_skip(self):
         page = '<textarea><template></textarea><meta name="vault:skip">\n'
