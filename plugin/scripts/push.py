@@ -271,7 +271,7 @@ def recover(clone):
         git("reset", "-q", "--hard", "HEAD", cwd=clone)
     else:
         git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ".", cwd=clone)
-    git("clean", "-q", "-f", "-d", "-x", "--", "pages", cwd=clone)
+    git("clean", "-q", "-f", "-d", "-x", cwd=clone)  # untracked leftovers anywhere (pages, overrides)
 
 
 EMPTY = "empty"  # trusted state of a vault with no commits yet

@@ -94,6 +94,26 @@ class TagTest(unittest.TestCase):
         self.assertIn("already plan", vault_tag.set_type(self.root, "Page1", "plan", "", self.env))
         self.assertEqual(run("git", "rev-parse", "main", cwd=self.bare), before)
 
+    def test_failed_push_is_retried_by_the_background_push(self):
+        other = os.path.realpath(tempfile.mkdtemp())  # a machine that never published here
+        env = {**self.env, "CLAUDE_PLUGIN_DATA": other}
+        with mock.patch.dict(os.environ, env), mock.patch.object(push, "push", side_effect=RuntimeError("offline")):
+            msg = vault_tag.set_type(self.root, "Page1", "research", "", env)
+        self.assertIn("pushed later", msg)
+        with mock.patch.dict(os.environ, env):
+            push.main(env)
+        self.assertEqual(self.remote_override()["type"], "research")
+
+    def test_uncommitted_override_leftover_is_not_taken_as_done(self):
+        vault_tag.list_artifacts(self.root, self.env)  # clone exists
+        clone = os.path.join(self.data, "vaults", os.listdir(os.path.join(self.data, "vaults"))[0])
+        os.makedirs(os.path.join(clone, "overrides"), exist_ok=True)
+        with open(os.path.join(clone, "overrides", "Page1.json"), "w") as fh:
+            json.dump({"type": "research"}, fh)  # as if killed before git add
+        msg = vault_tag.set_type(self.root, "Page1", "research", "", self.env)
+        self.assertIn("now research", msg)
+        self.assertEqual(self.remote_override()["type"], "research")
+
     def test_cli_exit_codes(self):
         out = io.StringIO()
         with redirect_stdout(out):

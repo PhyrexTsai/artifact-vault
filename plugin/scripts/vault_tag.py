@@ -79,6 +79,10 @@ def set_type(cwd, ref, kind, author, env=os.environ):
             raise TagError(f"{problem}; nothing changed")
         data = env.get("CLAUDE_PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
         push.trusted_head(data, found["key"], clone, push.head(clone))
+        # Register the vault for the background push, so a failed push below is retried
+        # even on a machine that never published a page to this vault.
+        route = os.path.join(data, "spool", found["key"], "vault.json")
+        push.write_json(route, {"vault": found["vault"], "name": found["name"]})
         try:
             push.push(clone)
         except RuntimeError as e:
@@ -102,6 +106,7 @@ def main(argv):
                 os.environ["CLAUDE_PLUGIN_DATA"] = args[1]
             else:
                 author = args[1]
+                os.environ["CLAUDE_PLUGIN_OPTION_AUTHOR_EMAIL"] = author  # commit identity fallback
         args = args[2:]
     try:
         if args[:1] == ["list"]:
