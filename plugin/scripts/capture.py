@@ -289,7 +289,10 @@ def capture(event, env=os.environ):
         "captured_at": now.isoformat(timespec="seconds"),
         "digest": dig,
     }
-    write_version(os.path.join(data_dir, "spool", found["key"], art_id, version), main, written, meta)
+    vault_spool = os.path.join(data_dir, "spool", found["key"])
+    write_version(os.path.join(vault_spool, art_id, version), main, written, meta)
+    with open(os.path.join(vault_spool, "vault.json"), "w") as fh:  # tells push.py where to send it
+        json.dump({"vault": found["vault"], "name": found["name"]}, fh)
 
     note = f"（略過 {len(problems)} 個子檔案）" if problems else ""
     out(system=f"artifact-vault：已排入書庫 {found['name']}：「{title}」{note}",

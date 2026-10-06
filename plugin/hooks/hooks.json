@@ -4,21 +4,32 @@
       {
         "matcher": "Artifact",
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/capture.py" }
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/capture.py"
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "async": true, "command": "sh \"${CLAUDE_PLUGIN_ROOT}\"/scripts/push.sh" }
+          {
+            "type": "command",
+            "async": true,
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/push.py"
+          }
         ]
       }
     ],
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "async": true, "command": "sh \"${CLAUDE_PLUGIN_ROOT}\"/scripts/push.sh" }
+          {
+            "type": "command",
+            "async": true,
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/push.py"
+          }
         ]
       }
     ]
