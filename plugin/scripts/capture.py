@@ -81,8 +81,6 @@ def safe_published(path):
         return None
     if any(p in ("", ".", "..") for p in path.split("/")):
         return None
-    if path.lower() in ("index.html", "meta.json"):
-        return None  # reserved names (compared case-insensitively for macOS and Windows)
     return path
 
 
@@ -100,19 +98,34 @@ def supporting_files(inp, cwd):
             if isinstance(src, dict):
                 src = src.get("from")  # an {artifact, path} copy has no local source
             items.append((pub, src))
-    taken = set()
     for pub, src in items:
         clean = safe_published(pub)
-        if clean is not None and clean.lower() in taken:
-            clean = None  # two paths that differ only in case would overwrite each other
         if clean is None:
             yield None, None, "unsafe published path"
             continue
-        taken.add(clean.lower())
         if not isinstance(src, str):
             yield clean, None, None  # removal or server-side copy: nothing local to keep
         else:
             yield clean, os.path.normpath(src if os.path.isabs(src) else os.path.join(base, src)), None
+
+
+def drop_conflicts(extras):
+    """Keep files that can all be written into one folder next to index.html and meta.json.
+
+    Compared case-insensitively (macOS, Windows): a reserved name, a duplicate, or a path
+    that is both a file and a folder is dropped instead of failing the whole version.
+    """
+    files, dirs, kept = {"index.html", "meta.json"}, set(), []
+    for pub, data in extras:
+        low = pub.lower()
+        parts = low.split("/")
+        ancestors = {"/".join(parts[:i]) for i in range(1, len(parts))}
+        if low in files or low in dirs or ancestors & files:
+            continue
+        files.add(low)
+        dirs |= ancestors
+        kept.append((pub, data))
+    return kept, len(extras) - len(kept)
 
 
 def find_secret(blobs):
@@ -187,8 +200,11 @@ def capture(event, env=os.environ):
             except OSError:
                 problems.append(f"missing source for {pub}")
 
+    extras, clashes = drop_conflicts(extras)
+    problems += ["path conflict"] * clashes
     title = str(res.get("title") or art_id)
-    kind = find_secret([main, title.encode("utf-8")] + [d for _, d in extras])
+    names = "\n".join(pub for pub, _ in extras).encode("utf-8")
+    kind = find_secret([main, title.encode("utf-8"), names] + [d for _, d in extras])
     if kind:  # the title may itself hold the credential, so name the page by id only
         out(system=f"artifact-vault：artifact {art_id} 看起來含有 {kind}，沒有存進書庫。移除後重新發佈即可。",
             context=f"artifact-vault did not queue this page: it appears to contain a {kind}.")

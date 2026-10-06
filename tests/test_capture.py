@@ -163,6 +163,26 @@ class CaptureTest(unittest.TestCase):
         with open(os.path.join(spool, "meta.json")) as fh:
             self.assertEqual(len(json.load(fh)["files"]), 1)
 
+    def test_file_folder_conflicts_drop_only_the_clashing_file(self):
+        root = make_project()
+        files = {"meta.json/child.css": "diagrams/d.html", "index.html/child.css": "diagrams/d.html",
+                 "assets": "diagrams/d.html", "assets/child.css": "diagrams/d.html",
+                 "deep/a.css": "diagrams/d.html", "Deep": "diagrams/d.html"}
+        result, msg = self.run_capture(publish_event(root, files=files))
+        self.assertEqual(result, "queued")
+        [spool] = self.spool_dirs()
+        with open(os.path.join(spool, "meta.json")) as fh:
+            self.assertEqual(json.load(fh)["files"], ["assets", "deep/a.css"])
+        self.assertIn("略過 4", msg["systemMessage"])
+
+    def test_credential_in_file_name_blocks_capture(self):
+        key = "ghp_" + "B" * 36
+        root = make_project()
+        result, msg = self.run_capture(publish_event(root, files={f"{key}.txt": "diagrams/d.html"}))
+        self.assertEqual(result, "secret")
+        self.assertNotIn(key, json.dumps(msg))
+        self.assertEqual(self.spool_dirs(), [])
+
     def test_credential_in_title_blocks_capture_without_echoing_it(self):
         key = "ghp_" + "A" * 36
         root = make_project()
