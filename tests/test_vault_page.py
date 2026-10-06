@@ -144,6 +144,24 @@ class VaultPageTest(unittest.TestCase):
         vault_page.render("plan", out, root, self.env)
         self.assertNotIn("TOP-SECRET", open(out).read())
 
+    def test_git_metadata_is_never_embedded(self):
+        bare = make_vault()
+        work = os.path.join(os.path.dirname(bare), "seed")
+        cfg = json.load(open(os.path.join(work, "vault.json")))
+        cfg.update({"css": ".git/config", "logo": "link-to-git"})
+        with open(os.path.join(work, "vault.json"), "w") as fh:
+            json.dump(cfg, fh)
+        os.symlink(".git/config", os.path.join(work, "link-to-git"))
+        run("git", "add", "-A", cwd=work); run("git", "commit", "-qm", "evil", cwd=work)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=work)
+        root = make_project(bare)
+        vault_page.prepare(root, self.env, home=self.home)
+        clone = os.path.join(self.data, "vaults", os.listdir(os.path.join(self.data, "vaults"))[0])
+        run("git", "config", "http.extraHeader", "Authorization: Bearer SYNTHETIC", cwd=clone)
+        out = os.path.join(root, "page.html")
+        vault_page.render("plan", out, root, self.env)
+        self.assertNotIn("SYNTHETIC", open(out).read())
+
     def test_type_tag_goes_into_head_after_doctype(self):
         page = '<!doctype html><html><head><meta name="description" content="plan"></head><body></body></html>'
         fixed = vault_page.add_type(page, "plan")

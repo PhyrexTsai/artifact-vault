@@ -85,6 +85,8 @@ def vault_file(clone, rel):
     path = os.path.realpath(os.path.join(clone, rel))
     if os.path.commonpath([root, path]) != root or not os.path.isfile(path):
         return None
+    if os.path.relpath(path, root).split(os.sep)[0].lower() == ".git":
+        return None  # local git metadata (config can hold credentials) is not vault content
     return path
 
 
