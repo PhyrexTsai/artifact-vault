@@ -402,6 +402,10 @@ def main(env=os.environ):
 
 
 if __name__ == "__main__":
+    # Hooks get CLAUDE_PLUGIN_DATA in the environment; a skill running this through the Bash
+    # tool does not, so it passes --data <dir>.
+    if len(sys.argv) >= 3 and sys.argv[1] == "--data" and sys.argv[2] and "${" not in sys.argv[2]:
+        os.environ["CLAUDE_PLUGIN_DATA"] = sys.argv[2]
     try:
         main()
     except Exception as e:
