@@ -5,7 +5,7 @@
 
 Versions are never edited. Each category change is a new file, overrides/<id>/<time>-<rand>.json,
 committed through the same lock and checks as push (the commit may touch only that file) and
-pushed. No file is ever shared between changes, so two machines tagging the same page never
+pushed. If it cannot be pushed, the commit is undone and the user is told to try again. No file is ever shared between changes, so two machines tagging the same page never
 conflict; the newest change (by "at") wins. The library site applies it when it builds.
 """
 import datetime
@@ -84,38 +84,36 @@ def set_type(cwd, ref, kind, author, env=os.environ):
         allowed = sorted(types) + ["unsorted"]
         if kind not in allowed:
             raise TagError(f"unknown type '{kind}'. Available: {', '.join(allowed)}")
-        arts = artifacts(clone)
-        if art not in arts:
-            raise TagError(f"{art} is not in the library yet (it may still be waiting to be pushed)")
-        if arts[art]["type"] == kind:
-            return f"{art} is already {kind}"
-        now = datetime.datetime.now(datetime.timezone.utc)
-        change = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
-        rel = f"overrides/{art}/{change}.json"
-        path = os.path.join(clone, *rel.split("/"))
-        push.inside_clone(clone, path)
-        push.write_json(path, {"type": kind, "by": author or None, "id": change,
-                               "at": now.isoformat(timespec="microseconds")})
-        before = push.head(clone)
-        push.git("add", "-f", "--", rel, cwd=clone)
-        push.git("commit", "--quiet", "-m", f"tag: {arts[art]['title']} as {kind}", cwd=clone)
-        problem = push.check_commit(clone, before, {rel: push.blob_id(path, push.git(
-            "rev-parse", "--show-object-format", cwd=clone).strip() or "sha1")})
-        if problem:
-            push.undo_commit(clone, before)
-            raise TagError(f"{problem}; nothing changed")
-        data = env.get("CLAUDE_PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
-        push.trusted_head(data, found["key"], clone, push.head(clone))
-        # Register the vault for the background push, so a failed push below is retried
-        # even on a machine that never published a page to this vault.
-        route = os.path.join(data, "spool", found["key"], "vault.json")
-        push.write_json(route, {"vault": found["vault"], "name": found["name"]})
-        try:
-            push.push(clone, os.path.join(data, "spool", found["key"]),
-                      trust=lambda h: push.trusted_head(data, found["key"], clone, h))
-        except RuntimeError as e:
-            return f"{art} is now {kind}; the commit is saved and will be pushed later ({e})"
-        return f"{art} is now {kind}"
+        for attempt in range(push.MAX_TRIES):
+            if attempt:  # the remote moved (or was purged) since: start over from it
+                push.mirror_remote(clone)
+            arts = artifacts(clone)
+            if art not in arts:
+                raise TagError(f"{art} is not in the library yet (it may still be waiting to be pushed)")
+            if arts[art]["type"] == kind:
+                return f"{art} is already {kind}"
+            now = datetime.datetime.now(datetime.timezone.utc)
+            change = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
+            rel = f"overrides/{art}/{change}.json"
+            path = os.path.join(clone, *rel.split("/"))
+            push.inside_clone(clone, path)
+            push.write_json(path, {"type": kind, "by": author or None, "id": change,
+                                   "at": now.isoformat(timespec="microseconds")})
+            before = push.head(clone)
+            push.git("add", "-f", "--", rel, cwd=clone)
+            push.git("commit", "--quiet", "-m", f"tag: {arts[art]['title']} as {kind}", cwd=clone)
+            problem = push.check_commit(clone, before, {rel: push.blob_id(path, push.git(
+                "rev-parse", "--show-object-format", cwd=clone).strip() or "sha1")})
+            if problem:
+                push.undo_commit(clone, before)
+                raise TagError(f"{problem}; nothing changed")
+            try:
+                push.push_head(clone)
+                return f"{art} is now {kind}"
+            except RuntimeError as e:
+                push.undo_commit(clone, before)  # the clone never keeps unpushed work
+                error = e
+        raise TagError(f"could not push the change, so nothing changed; try again later ({error})")
 
 
 def list_artifacts(cwd, env=os.environ):

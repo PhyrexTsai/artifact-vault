@@ -2,16 +2,18 @@
 
 For every vault in ${CLAUDE_PLUGIN_DATA}/spool/<key>/:
   1. Take an OS file lock. If another session holds it, stop: the next turn tries again.
-  2. Clone the vault the first time, or `pull --rebase` an existing clone. Git never prompts
-     (GIT_TERMINAL_PROMPT=0, ssh BatchMode), so bad credentials fail instead of hanging.
+  2. Clone the vault the first time, then make the clone exactly the remote branch (fetch and
+     reset). Git never prompts (GIT_TERMINAL_PROMPT=0, ssh BatchMode), so bad credentials fail
+     instead of hanging.
   3. Copy each version into pages/<id>/<version>/ (its meta.json included). Push never
      edits a shared file: every version has its own path, so pushes from several machines
-     rebase without conflicts. The per-artifact summary and duplicate hiding (same digest
+     never conflict. The per-artifact summary and duplicate hiding (same digest
      as the previous seq) happen when the site is built. Git stores identical content once,
      so a duplicate version costs almost nothing.
-  4. Commit pages/ (forced past .gitignore), check that every file landed in the commit,
-     then delete those spool folders and push. A failed push stays committed in the clone
-     and is pushed by the next run.
+  4. Commit pages/ (forced past .gitignore), check that every file landed in the commit, and
+     push. Only a pushed version leaves the spool. A failed push undoes the commit; the
+     versions stay queued and the run starts over from the remote (a few times), so the
+     clone never holds unpushed work and never rebases.
 
 Writes the outcome to state/<key>-push.json for the setup skill and appends to logs/push.log.
 Never fails the session: errors are recorded and the hook exits 0.
@@ -109,15 +111,10 @@ def queued_versions(spool):
     return found
 
 
-def ensure_clone(url, clone, spool=None):
-    """Clone, or bring an existing clone up to date. Returns notes about what happened."""
-    notes = {}
+def ensure_clone(url, clone):
+    """Clone the vault the first time."""
     if os.path.isdir(os.path.join(clone, ".git")):
-        if not git("ls-remote", "--heads", "origin", cwd=clone).strip():
-            return notes  # the vault has no branch yet: the first push creates it
-        notes = follow_rewrite(clone, spool)  # fetches, and handles a rewritten remote
-        rebase_onto_fetched(clone)
-        return notes
+        return
     os.makedirs(os.path.dirname(clone), exist_ok=True)
     tmp = f"{clone}.cloning{os.getpid()}"
     shutil.rmtree(tmp, ignore_errors=True)
@@ -127,9 +124,7 @@ def ensure_clone(url, clone, spool=None):
     configure(tmp)
     if subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=tmp, capture_output=True).returncode == 0:
         git("checkout", "--quiet", cwd=tmp)
-        mark_synced(tmp)
     os.replace(tmp, clone)
-    return notes
 
 
 def rev(clone, name):
@@ -137,77 +132,23 @@ def rev(clone, name):
     return r.stdout.strip() or None
 
 
-SYNCED = "refs/vault/synced"  # the remote commit this clone last finished integrating
+def mirror_remote(clone):
+    """Make the clone exactly the remote branch.
 
-
-def mark_synced(clone):
-    """Record the remote branch as integrated. Only called once a sync is complete: the
-    remote-tracking ref moves at fetch time, so it cannot tell an interrupted sync apart."""
-    remote = rev(clone, f"refs/remotes/origin/{current_branch(clone)}")
-    if remote:
-        git("update-ref", SYNCED, remote, cwd=clone)
-
-
-def rebase_onto_fetched(clone):
-    """Rebase onto the remote branch as follow_rewrite() fetched and checked it. Never fetch
-    again here: a purge landing in between would be replayed onto unchecked history."""
-    try:
-        git("rebase", "--quiet", f"refs/remotes/origin/{current_branch(clone)}", cwd=clone)
-    except RuntimeError:
-        subprocess.run(["git", *NO_HOOKS, "rebase", "--abort"], cwd=clone, capture_output=True)
-        raise  # never leave the clone mid-rebase; the commits stay and the next run retries
-    mark_synced(clone)
-
-
-def follow_rewrite(clone, spool):
-    """After a purge rewrote the vault's history, a rebase would replay the old history (and
-    the purged page) on top of the new one. When the remote no longer contains what this
-    clone last saw of it, put this clone's unpushed versions back into the spool, then reset
-    to the remote. Version folders are self-contained, so the spool re-applies them."""
+    This clone never holds work of its own: a run commits its versions and pushes them, or
+    undoes the commit and leaves them in the spool. So whatever is here can be thrown away,
+    and a remote whose history was rewritten (a purge) is followed exactly like one that
+    moved forward. Nothing is ever rebased."""
     branch = current_branch(clone)
-    seen = rev(clone, SYNCED) or rev(clone, f"refs/remotes/origin/{branch}")  # the latter: clones from before
-    git("fetch", "--quiet", "origin", cwd=clone)
+    git("fetch", "--quiet", "--prune", "origin", cwd=clone)
     remote = rev(clone, f"refs/remotes/origin/{branch}")
-    if not seen or not remote or seen == remote:
-        return {}
-    if subprocess.run(["git", "merge-base", "--is-ancestor", seen, remote], cwd=clone,
-                      capture_output=True, env=git_env()).returncode == 0:
-        return {}  # the remote only moved forward: the usual rebase handles it
-    respooled = 0
-    if spool and head(clone) and head(clone) != seen:
-        changed = git("diff", "--name-only", "-z", "--no-renames", seen, "HEAD", "--", "pages", cwd=clone).split("\0")
-        for art, ver in sorted({tuple(p.split("/")[1:3]) for p in changed if p.count("/") >= 3}):
-            src = os.path.join(clone, "pages", art, ver)
-            meta = read_json(os.path.join(src, "meta.json"), None)
-            dest = os.path.join(spool, art, ver)
-            if os.path.isdir(src) and not os.path.islink(src) and isinstance(meta, dict) \
-                    and meta.get("id") == art and meta.get("version") == ver and not os.path.exists(dest):
-                shutil.copytree(src, dest, symlinks=True)
-                respooled += 1
-    # Unpushed category changes: each is one new file under overrides/<id>/. Keep their bytes,
-    # reset, then commit them again (except for pages the remote now lists as purged).
-    added = git("diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", seen, "HEAD", "--", "overrides",
-                cwd=clone).split("\0") if head(clone) and head(clone) != seen else []
-    kept = {}
-    for rel in (p for p in added if p.count("/") == 2):
-        path = os.path.join(clone, *rel.split("/"))
-        if os.path.isfile(path) and not os.path.islink(path):
-            with open(path, "rb") as fh:
-                kept[rel] = fh.read()
-    git("reset", "-q", "--hard", f"refs/remotes/origin/{branch}", cwd=clone)
-    purged = purged_ids(clone)
-    kept = {rel: data for rel, data in kept.items() if rel.split("/")[1] not in purged}
-    for rel, data in kept.items():
-        path = os.path.join(clone, *rel.split("/"))
-        inside_clone(clone, path)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as fh:
-            fh.write(data)
-        git("add", "-f", "--", rel, cwd=clone)
-    if kept:
-        git("commit", "--quiet", "-m", f"tag: {len(kept)} change(s) kept after the vault history was rewritten", cwd=clone)
-    mark_synced(clone)
-    return {"history_rewritten": True, "respooled": respooled, **({"tags_kept": len(kept)} if kept else {})}
+    if remote:
+        git("reset", "-q", "--hard", remote, cwd=clone)
+    elif head(clone):  # the vault is still empty: drop a commit an interrupted run left
+        undo_commit(clone, None)
+    else:
+        git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ".", cwd=clone)
+    git("clean", "-q", "-f", "-d", "-x", cwd=clone)  # untracked leftovers anywhere (pages, overrides)
 
 
 def configure(clone):
@@ -339,63 +280,12 @@ def apply_version(clone, meta, folder):
     return {f"{rel}/{src}": blob for src, blob in zip(sources, blobs)}
 
 
-def recover(clone):
-    """Throw away uncommitted changes an earlier run (or a failed git hook) left behind.
-
-    This clone belongs to the plugin and never holds your edits. The spool is deleted only
-    after a commit that matches it, so anything uncommitted is either still in the spool (and
-    is applied again) or was never verified. Committed but unpushed work is kept.
-    """
-    if head(clone):
-        git("reset", "-q", "--hard", "HEAD", cwd=clone)
-    else:
-        git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ".", cwd=clone)
-    git("clean", "-q", "-f", "-d", "-x", cwd=clone)  # untracked leftovers anywhere (pages, overrides)
-
-
-EMPTY = "empty"  # trusted state of a vault with no commits yet
-
-
-def trusted_head(data_dir, key, clone, value=None):
-    """Read or record the last HEAD that was verified (or came from the remote)."""
-    path = os.path.join(data_dir, "state", f"{key}-verified")
-    if value is not None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
-            fh.write(value)
-        return value
-    try:
-        with open(path) as fh:
-            return fh.read().strip() or None
-    except OSError:
-        return None
-
-
-def roll_back_unverified(data_dir, key, clone):
-    """A run killed between commit and check leaves a commit nobody verified. Go back to the
-    last trusted HEAD; the spool of anything not yet verified still exists and is re-applied."""
-    trusted, current = trusted_head(data_dir, key, clone), head(clone)
-    if not trusted or not current or current == trusted:
-        return
-    if trusted == EMPTY:  # the vault was empty: an unverified first commit is undone entirely
-        undo_commit(clone, None)
-        return
-    known = subprocess.run(["git", "cat-file", "-e", f"{trusted}^{{commit}}"], cwd=clone, capture_output=True)
-    if known.returncode == 0:
-        git("reset", "-q", "--hard", trusted, cwd=clone)
-
-
 def refresh_clone(data_dir, key, url, clone):
-    """Bring the private clone to a clean, trusted, up-to-date state. Call with the lock held.
-    Every user of the clone (push, the page skill) goes through here so the trusted HEAD
-    always matches what is on disk."""
-    if os.path.isdir(os.path.join(clone, ".git")):
-        recover(clone)  # before pull: a dirty tree would stop the rebase
-        roll_back_unverified(data_dir, key, clone)
-    notes = ensure_clone(url, clone, os.path.join(data_dir, "spool", key))
+    """Bring the private clone to the remote's state. Call with the lock held. Every user of
+    the clone (push, the page, tag, backfill and purge skills) goes through here."""
+    ensure_clone(url, clone)
     configure(clone)
-    trusted_head(data_dir, key, clone, head(clone) or EMPTY)  # fresh clone or rebased onto the remote
-    return notes
+    mirror_remote(clone)
 
 
 def purged_ids(clone):
@@ -404,6 +294,9 @@ def purged_ids(clone):
     if not os.path.isdir(folder) or os.path.islink(folder):
         return set()
     return {n[:-5] for n in os.listdir(folder) if n.endswith(".json")}
+
+
+MAX_TRIES = 3
 
 
 def push_vault(data_dir, key):
@@ -418,72 +311,57 @@ def push_vault(data_dir, key):
     with Lock(os.path.join(data_dir, "locks", f"{key}.lock")) as lock:
         if not lock.held:
             return {"skipped": "another session is pushing"}
-        notes = refresh_clone(data_dir, key, url, clone)
-        purged = purged_ids(clone)
         trash = os.path.join(data_dir, "trash")
+        shutil.rmtree(trash, ignore_errors=True)  # leftovers of an interrupted retire()
         dropped = 0
-        for meta, folder in queued_versions(spool):  # a purged page never comes back
-            if meta["id"] in purged:
-                retire(folder, trash)
-                dropped += 1
-        queued = queued_versions(spool)
-        expected, titles = {}, []
-        for meta, folder in queued:
-            expected.update(apply_version(clone, meta, folder))
-            titles.append(meta.get("title") or meta["id"])
-        if expected:
+        for attempt in range(MAX_TRIES):
+            refresh_clone(data_dir, key, url, clone)
+            purged = purged_ids(clone)
+            for meta, folder in queued_versions(spool):  # a purged page never comes back
+                if meta["id"] in purged:
+                    retire(folder, trash)
+                    dropped += 1
+            extra = {"dropped_purged": dropped} if dropped else {}
+            queued = queued_versions(spool)
+            if not queued:
+                return {"applied": 0, "pushed": 0, **extra}
+            expected, titles = {}, []
+            for meta, folder in queued:
+                expected.update(apply_version(clone, meta, folder))
+                titles.append(meta.get("title") or meta["id"])
             before = head(clone)
             commit_pages(clone, f"archive: {titles[0]}" if len(titles) == 1 else f"archive: {len(titles)} versions")
             problem = check_commit(clone, before, expected)
             if problem:
                 undo_commit(clone, before)
                 raise RuntimeError(f"{problem}; commit undone, spool kept")
-            trusted_head(data_dir, key, clone, head(clone))
-        shutil.rmtree(trash, ignore_errors=True)  # leftovers of an interrupted retire()
-        for _, folder in queued:  # only now: the commit holds their content
-            retire(folder, trash)
-        check_purged(clone)
-        ahead = commits_to_push(clone)
-        if ahead:
-            push(clone, spool, trust=lambda h: trusted_head(data_dir, key, clone, h))
-        return {"applied": len(queued), "pushed": ahead, **notes, **({"dropped_purged": dropped} if dropped else {})}
-
-
-def commits_to_push(clone):
-    ok = lambda *a: subprocess.run(["git", *a], cwd=clone, capture_output=True, text=True, env=git_env())
-    if ok("rev-parse", "--verify", "HEAD").returncode:
-        return 0  # empty clone, nothing committed yet
-    r = ok("rev-list", "--count", "@{upstream}..HEAD")
-    if r.returncode:  # no upstream yet (first push to an empty vault)
-        r = ok("rev-list", "--count", "HEAD")
-    return int(r.stdout.strip() or 0)
+            changed = head(clone) != before  # unchanged: already pushed by a run that died before retiring
+            if changed:
+                try:
+                    push_head(clone)
+                except RuntimeError as e:
+                    undo_commit(clone, before)
+                    if attempt == MAX_TRIES - 1:
+                        raise RuntimeError(f"{e}; the versions stay queued")
+                    continue  # someone pushed (or purged) first: start over from the remote
+            for _, folder in queued:  # only now: the remote holds their content
+                retire(folder, trash)
+            return {"applied": len(queued), "pushed": int(changed), **extra}
 
 
 def check_purged(clone):
-    """Never push a purged page, e.g. one committed by a plugin version without these checks."""
+    """Never push a purged page."""
     back = [a for a in purged_ids(clone)
             if git("ls-tree", "--name-only", "HEAD", "--", f"pages/{a}", f"overrides/{a}", cwd=clone).strip()]
     if back:
-        raise RuntimeError(f"{len(back)} purged page(s) are back in this clone's history; not pushing")
+        raise RuntimeError(f"{len(back)} purged page(s) are in this commit; not pushing")
 
 
-def push(clone, spool=None, trust=None):
-    check_purged(clone)  # every caller (background push, tag) goes through here
-    try:
-        git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
-        mark_synced(clone)
-        return
-    except RuntimeError:
-        if not git("ls-remote", "--heads", "origin", cwd=clone).strip():
-            raise  # empty vault that rejected the first push: nothing to rebase onto
-    # Someone pushed first. That may have been a purge: follow a rewrite before rebasing, so
-    # the old history (and the purged page) is never replayed onto the new one.
-    if follow_rewrite(clone, spool) and trust:
-        trust(head(clone))  # or the next run's roll-back would undo the reset
-    rebase_onto_fetched(clone)
+def push_head(clone):
+    """Push the clone's commit as the remote branch. Fast-forward only: a rejected push means
+    the remote moved, and the caller undoes its commit and starts over from the remote."""
     check_purged(clone)
-    git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
-    mark_synced(clone)
+    git("push", "--quiet", "origin", f"HEAD:refs/heads/{current_branch(clone)}", cwd=clone)
 
 
 def main(env=os.environ):

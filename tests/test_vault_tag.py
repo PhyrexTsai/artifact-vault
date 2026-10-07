@@ -96,15 +96,32 @@ class TagTest(unittest.TestCase):
         self.assertIn("already plan", vault_tag.set_type(self.root, "Page1", "plan", "", self.env))
         self.assertEqual(run("git", "rev-parse", "main", cwd=self.bare), before)
 
-    def test_failed_push_is_retried_by_the_background_push(self):
-        other = os.path.realpath(tempfile.mkdtemp())  # a machine that never published here
-        env = {**self.env, "CLAUDE_PLUGIN_DATA": other}
-        with mock.patch.dict(os.environ, env), mock.patch.object(push, "push", side_effect=RuntimeError("offline")):
-            msg = vault_tag.set_type(self.root, "Page1", "research", "", env)
-        self.assertIn("pushed later", msg)
-        with mock.patch.dict(os.environ, env):
-            push.main(env)
+    def test_a_tag_that_cannot_be_pushed_changes_nothing(self):
+        before = run("git", "rev-parse", "main", cwd=self.bare)
+        with mock.patch.object(push, "push_head", side_effect=RuntimeError("offline")):
+            with self.assertRaises(vault_tag.TagError) as err:
+                vault_tag.set_type(self.root, "Page1", "research", "", self.env)
+        self.assertIn("nothing changed", str(err.exception))
+        self.assertEqual(run("git", "rev-parse", "main", cwd=self.bare), before)
+        clone = os.path.join(self.data, "vaults", os.listdir(os.path.join(self.data, "vaults"))[0])
+        self.assertEqual(push.head(clone), before.strip())  # no unpushed commit left behind
+        self.assertIn("now research", vault_tag.set_type(self.root, "Page1", "research", "", self.env))
         self.assertEqual(self.remote_override()["type"], "research")
+
+    def test_a_tag_racing_another_push_starts_over_from_the_remote(self):
+        real, calls = push.push_head, []
+
+        def first_rejected(clone):
+            calls.append(clone)
+            if len(calls) == 1:
+                raise RuntimeError("rejected: fetch first")
+            return real(clone)
+
+        with mock.patch.object(push, "push_head", side_effect=first_rejected):
+            self.assertIn("now research", vault_tag.set_type(self.root, "Page1", "research", "", self.env))
+        self.assertEqual(len(calls), 2)
+        names = [n for n in run("git", "ls-tree", "-r", "--name-only", "main", cwd=self.bare).split() if n.startswith("overrides/")]
+        self.assertEqual(len(names), 1)
 
     def test_uncommitted_override_leftover_is_not_taken_as_done(self):
         vault_tag.list_artifacts(self.root, self.env)  # clone exists

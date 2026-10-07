@@ -37,6 +37,8 @@ def paths_for(art):
 
 def history(clone, art):
     """[(short sha, subject)] of commits on the branch that touch the page."""
+    if not push.head(clone):
+        return []  # the vault has no commits yet
     out = push.git("log", "--format=%h %s", "--", *paths_for(art), cwd=clone)
     return [tuple(line.split(" ", 1)) if " " in line else (line, "") for line in out.splitlines() if line]
 
@@ -73,10 +75,9 @@ def run(cwd, ref, confirm, author=None, env=os.environ):
         for ver in queued(spool, art):  # never pushed: just drop them
             push.retire(os.path.join(spool, art, ver), trash)
         branch = push.current_branch(clone)
-        lease = push.rev(clone, f"refs/remotes/origin/{branch}")
-        if not lease:
-            raise PurgeError("the vault has no pushed branch yet")
-        others = push.git("log", "--format=%H", "--", ".", *[f":(exclude){p}" for p in paths_for(art)], cwd=clone).strip()
+        lease = push.rev(clone, f"refs/remotes/origin/{branch}") or ""  # "": the branch must not exist yet
+        others = push.git("log", "--format=%H", "--", ".", *[f":(exclude){p}" for p in paths_for(art)],
+                          cwd=clone).strip() if push.head(clone) else ""
         if history(clone, art) and not others:
             # Every commit only touched this page: nothing would be left to rewrite onto.
             # Start the branch over with a single root commit (the marker below).
@@ -92,7 +93,7 @@ def run(cwd, ref, confirm, author=None, env=os.environ):
             r = subprocess.run(["git", *push.NO_HOOKS, "filter-branch", "-f", "--index-filter", rm, "--prune-empty",
                                 "--", branch], cwd=clone, env=fenv, capture_output=True, text=True, timeout=600)
             if r.returncode:
-                push.git("reset", "-q", "--hard", lease, cwd=clone)
+                push.mirror_remote(clone)
                 raise PurgeError(f"rewriting history failed; nothing pushed: {(r.stderr or r.stdout).strip()[-300:]}")
         marker = f"purged/{art}.json"
         path = os.path.join(clone, *marker.split("/"))
@@ -103,17 +104,16 @@ def run(cwd, ref, confirm, author=None, env=os.environ):
             push.git("add", "-f", "--", marker, cwd=clone)
             push.git("commit", "--quiet", "-m", f"purge: {art}", cwd=clone)  # the id only: a title may be the secret
         if push.git("log", "--format=%h", "HEAD", "--", *paths_for(art), cwd=clone).strip():
+            push.mirror_remote(clone)
             raise PurgeError("the page is still in the rewritten branch; nothing pushed")
         try:
             push.git("push", "--quiet", f"--force-with-lease=refs/heads/{branch}:{lease}", "origin", f"HEAD:refs/heads/{branch}", cwd=clone)
         except RuntimeError as e:
-            push.git("fetch", "--quiet", "origin", cwd=clone)
-            push.git("reset", "-q", "--hard", f"refs/remotes/origin/{branch}", cwd=clone)
+            push.mirror_remote(clone)
             raise PurgeError(f"the vault changed while purging, or the push was refused; run the purge again ({e})")
         push.git("fetch", "--quiet", "origin", cwd=clone)
         if push.rev(clone, f"refs/remotes/origin/{branch}") != push.head(clone):
             raise PurgeError("pushed, but the remote branch does not match; check the vault")
-        push.mark_synced(clone)  # before dropping objects: the old value still points at the old history
         # Now that no ref points at the old history, drop its objects from this clone too.
         for ref_line in push.git("for-each-ref", "--format=%(refname)", "refs/original", cwd=clone).splitlines():
             push.git("update-ref", "-d", ref_line, cwd=clone)
@@ -121,7 +121,6 @@ def run(cwd, ref, confirm, author=None, env=os.environ):
         push.git("gc", "--quiet", "--prune=now", cwd=clone, timeout=600)
         if push.git("log", "--all", "--format=%h", "--", *paths_for(art), cwd=clone).strip():
             raise PurgeError("pushed, but this clone still holds the page; delete the clone folder to be sure")
-        push.trusted_head(data, found["key"], clone, push.head(clone))
         return {"id": art, "vault": found["name"], "branch": branch, "head": push.head(clone)[:12]}
 
 

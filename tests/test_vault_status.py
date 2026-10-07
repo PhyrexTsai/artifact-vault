@@ -70,19 +70,18 @@ class StatusTest(unittest.TestCase):
         self.assertIn("RuntimeError: offline", text)
         self.assertIn("Set the author email", text)
 
-    def test_committed_but_unpushed_pages_are_counted(self):
-        clone = os.path.join(self.data, "vaults", "k1")
-        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
-        subprocess.run(["git", "init", "-q", clone], check=True)
-        open(os.path.join(clone, "a.txt"), "w").close()
-        subprocess.run(["git", "add", "-A"], cwd=clone, check=True)
-        subprocess.run(["git", "commit", "-qm", "x"], cwd=clone, check=True, env=env)
+    def test_a_failed_push_leaves_versions_waiting(self):
+        spool = os.path.join(self.data, "spool", "k1")
+        os.makedirs(os.path.join(spool, "A1", "v1"))
+        with open(os.path.join(spool, "vault.json"), "w") as fh:
+            json.dump({"vault": "/nowhere", "name": "lib"}, fh)
+        with open(os.path.join(spool, "A1", "v1", "meta.json"), "w") as fh:
+            json.dump({"id": "A1", "version": "v1"}, fh)
         os.makedirs(os.path.join(self.data, "state"))
         with open(os.path.join(self.data, "state", "k1-push.json"), "w") as fh:
             json.dump({"ok": False, "at": "t", "error": "offline"}, fh)
         text = status(["--data", self.data, make_project()])
-        self.assertIn("1 commit(s) not pushed", text)
+        self.assertIn("1 waiting", text)
 
     def test_unsubstituted_data_dir_is_reported(self):
         text = status(["--data", "${CLAUDE_PLUGIN_DATA}", make_project()])

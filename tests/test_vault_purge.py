@@ -112,17 +112,16 @@ class PurgeTest(unittest.TestCase):
         b = Machine(self.bare)
         b.publish("Keep", "v2", 2)
         b.publish("Gone", "v3", 3, "secret three")  # queued on b, purged meanwhile
-        b.push()  # b's clone now has the old history
-        b.publish("Other", "v1", 1)
-        with mock.patch.object(push, "push", side_effect=RuntimeError("offline")):
-            b.push()  # committed in b's clone, not pushed
+        with mock.patch.object(push, "push_head", side_effect=RuntimeError("offline")):
+            b.push()  # nothing pushed, nothing kept in b's clone: all stays queued
         self.purge()
+        b.publish("Other", "v1", 1)
         result = b.push()
         self.assertTrue(result.get("ok"), result)
-        self.assertTrue(result.get("history_rewritten"))
-        self.assertEqual(result.get("respooled"), 1)
+        self.assertEqual(result.get("dropped_purged"), 1)
         run("git", "gc", "-q", "--prune=now", cwd=self.bare)
         self.assertEqual(self.remote_history("pages/Gone"), [])
+        self.assertNotIn(b"secret three", all_objects(self.bare))
         self.assertIn("pages/Other/v1/index.html", self.remote_files())
         self.assertIn("pages/Keep/v2/index.html", self.remote_files())
 
@@ -147,18 +146,17 @@ class PurgeTest(unittest.TestCase):
         self.assertEqual(self.remote_history("pages/Gone"), [])
         self.assertIn("purged/Gone.json", self.remote_files())
 
-    def test_unpushed_tags_survive_a_rewrite(self):
+    def test_a_clone_with_old_history_tags_after_a_purge(self):
         import vault_tag
         b = Machine(self.bare)
-        b.push()
-        with mock.patch.dict(os.environ, b.env), mock.patch.object(push, "push", side_effect=RuntimeError("offline")):
-            vault_tag.set_type(b.root, "Keep", "research", "b@example.com", b.env)
+        with mock.patch.dict(os.environ, b.env):
+            vault_tag.list_artifacts(b.root, b.env)  # b's clone has the old history
         self.purge()
-        result = b.push()
-        self.assertEqual(result.get("tags_kept"), 1, result)
-        names = [n for n in self.remote_files() if n.startswith("overrides/Keep/")]
-        self.assertEqual(len(names), 1)
-        self.assertEqual(json.loads(run("git", "show", f"main:{names[0]}", cwd=self.bare))["type"], "research")
+        with mock.patch.dict(os.environ, b.env):
+            self.assertIn("now research", vault_tag.set_type(b.root, "Keep", "research", "b@example.com", b.env))
+        run("git", "gc", "-q", "--prune=now", cwd=self.bare)
+        self.assertEqual(self.remote_history("pages/Gone"), [])
+        self.assertTrue(any(n.startswith("overrides/Keep/") for n in self.remote_files()))
 
     def test_queued_versions_of_a_purged_page_are_dropped(self):
         b = Machine(self.bare)
@@ -245,28 +243,16 @@ class PurgeTest(unittest.TestCase):
         self.assertIn("purged/Fresh.json", self.remote_files())
         self.assertNotIn(b"queued secret", all_objects(self.bare))
 
-    def test_tagging_never_pushes_a_purged_page_back(self):
-        import vault_tag
-        b = Machine(self.bare)
-        b.push()
-        with mock.patch.dict(os.environ, b.env):
-            vault_tag.list_artifacts(b.root, b.env)  # b's clone exists
+    def test_a_commit_holding_a_purged_page_is_never_pushed(self):
         self.purge()
-        with mock.patch.dict(os.environ, b.env):
-            vault_tag.list_artifacts(b.root, b.env)  # b follows the rewrite
-        clone = os.path.join(b.data, "vaults", os.listdir(os.path.join(b.data, "vaults"))[0])
-        # An older plugin version commits the purged page anyway.
+        clone = os.path.join(self.a.data, "vaults", os.listdir(os.path.join(self.a.data, "vaults"))[0])
         os.makedirs(os.path.join(clone, "pages", "Gone", "v7"))
         with open(os.path.join(clone, "pages", "Gone", "v7", "index.html"), "w") as fh:
-            fh.write("old plugin")
+            fh.write("from an older plugin")
         run("git", "add", "-f", "pages", cwd=clone)
         run("git", "commit", "-qm", "old plugin", cwd=clone)
-        push.trusted_head(b.data, os.path.basename(clone), clone, push.head(clone))  # that plugin verified it
-        with mock.patch.dict(os.environ, b.env):
-            try:
-                vault_tag.set_type(b.root, "Keep", "research", None, b.env)
-            except vault_tag.TagError:
-                pass
+        with self.assertRaises(RuntimeError):
+            push.push_head(clone)
         self.assertEqual(self.remote_history("pages/Gone"), [])
 
     def test_an_interrupted_rewrite_is_still_recognised(self):
@@ -279,10 +265,39 @@ class PurgeTest(unittest.TestCase):
         b.publish("Other", "v1", 1)
         result = b.push()
         self.assertTrue(result.get("ok"), result)
-        self.assertTrue(result.get("history_rewritten"), result)
         self.assertIn("pages/Other/v1/index.html", self.remote_files())
         run("git", "gc", "-q", "--prune=now", cwd=self.bare)
         self.assertEqual(self.remote_history("pages/Gone"), [])
+
+    def test_a_clone_of_an_empty_vault_follows_the_first_push_elsewhere(self):
+        import vault_tag
+        base = os.path.realpath(tempfile.mkdtemp())
+        bare = os.path.join(base, "fresh-artifact.git")
+        run("git", "init", "-q", "--bare", "-b", "main", bare)
+        b, c = Machine(bare), Machine(bare)
+        with mock.patch.dict(os.environ, b.env):
+            vault_tag.list_artifacts(b.root, b.env)  # b clones the vault while it is empty
+        c.publish("First", "v1", 1)
+        self.assertTrue(c.push().get("ok"))
+        b.publish("Second", "v1", 1)
+        self.assertTrue(b.push().get("ok"))
+        names = run("git", "ls-tree", "-r", "--name-only", "main", cwd=bare)
+        self.assertIn("pages/First/v1/index.html", names)
+        self.assertIn("pages/Second/v1/index.html", names)
+
+    def test_purge_before_the_vault_has_any_commit(self):
+        base = os.path.realpath(tempfile.mkdtemp())
+        bare = os.path.join(base, "unborn-artifact.git")
+        run("git", "init", "-q", "--bare", "-b", "main", bare)
+        m = Machine(bare)
+        m.publish("Early", "v1", 1, "early secret")
+        with mock.patch.dict(os.environ, m.env):
+            p = vault_purge.plan(m.root, "Early", m.env)
+            self.assertEqual((p["commits"], p["queued"]), ([], ["v1"]))
+            vault_purge.run(m.root, "Early", "Early", None, m.env)
+        self.assertEqual(run("git", "ls-tree", "-r", "--name-only", "main", cwd=bare).split(), ["purged/Early.json"])
+        m.push()
+        self.assertNotIn(b"early secret", all_objects(bare))
 
     def test_cli_plan_and_run(self):
         script = os.path.join(HERE, "..", "plugin", "scripts", "vault_purge.py")
