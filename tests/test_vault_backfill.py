@@ -86,11 +86,44 @@ class BackfillTest(unittest.TestCase):
         push.main(self.env)
         self.assertEqual(json.loads(self.remote("pages/Mixed/live/meta.json"))["seq"], 3)
 
-    def test_without_stored_seqs_the_capture_time_orders_it(self):
-        self.publish("NoSeq", "p1", None)
-        self.add("NoSeq", "live", {"index.html": "<p>live</p>"})
+    def test_first_backfills_count_up_from_one_even_within_a_second(self):
+        self.add("NoSeq", "a", {"index.html": "<title>A</title>"}, title="old title")
+        self.add("NoSeq", "b", {"index.html": "<title>B</title>"}, title="new title")
         push.main(self.env)
-        self.assertIsNone(json.loads(self.remote("pages/NoSeq/live/meta.json"))["seq"])
+        self.assertEqual(json.loads(self.remote("pages/NoSeq/a/meta.json"))["seq"], 1)
+        self.assertEqual(json.loads(self.remote("pages/NoSeq/b/meta.json"))["seq"], 2)
+        import vault_tag
+        self.assertEqual(vault_tag.list_artifacts(self.root, self.env)["NoSeq"]["title"], "new title")
+
+    def test_a_later_publish_sorts_after_a_backfill(self):
+        self.add("Later", "b1", {"index.html": "<p>b</p>"})
+        self.publish("Later", "p5", 5)  # its real publish count
+        push.main(self.env)
+        import vault_tag
+        self.assertEqual(vault_tag.list_artifacts(self.root, self.env)["Later"]["latest"], "p5")
+
+    def test_meta_linked_from_outside_the_clone_is_not_read(self):
+        self.add("Sym1", "v1", {"index.html": "<p>1</p>"})
+        push.main(self.env)
+        private = os.path.realpath(tempfile.mkdtemp())
+        with open(os.path.join(private, "meta.json"), "w") as fh:
+            json.dump({"id": "Sym1", "version": "evil", "seq": 1, "files_written": ["private-name.txt"]}, fh)
+        seed = os.path.realpath(tempfile.mkdtemp())
+        run("git", "clone", "-q", self.bare, seed)
+        os.makedirs(os.path.join(seed, "pages", "Sym1", "evil"))
+        os.symlink(os.path.join(private, "meta.json"), os.path.join(seed, "pages", "Sym1", "evil", "meta.json"))
+        run("git", "add", "-A", cwd=seed)
+        run("git", "commit", "-qm", "link", cwd=seed)
+        run("git", "push", "-q", "origin", "HEAD:main", cwd=seed)
+        self.add("Sym1", "v2", {"index.html": "<p>2</p>"})
+        push.main(self.env)
+        meta = json.loads(self.remote("pages/Sym1/v2/meta.json"))
+        self.assertNotIn("private-name.txt", json.dumps(meta))
+
+    def test_supporting_files_capture_cannot_keep_are_reported(self):
+        status, msg = self.add("Part1", "v1", {"index.html": "<p>x</p>", "meta.json": "{}", "ok.css": "c"})
+        self.assertEqual(status, "partial", msg)
+        self.assertIn("1 supporting", msg)
 
     def test_skip_token_and_credentials_are_honoured(self):
         self.assertEqual(self.add("S1", "v1", {"index.html": "<!-- vault:skip --><p>x</p>"})[0], "skipped")

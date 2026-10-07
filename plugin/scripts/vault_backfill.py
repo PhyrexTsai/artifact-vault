@@ -12,8 +12,8 @@
       spool, so the background push stores it like any other version.
 
 A version already in the library or the spool is skipped. A backfilled version sorts after
-the versions the library already has: its seq is one more than the largest stored seq, or
-none (ordered by capture time) when stored versions have no seq.
+the versions the library already has: its seq is one more than the largest stored seq (1
+when there is none).
 """
 import contextlib
 import io
@@ -34,22 +34,33 @@ class BackfillError(Exception):
 
 
 def stored_versions(clone, spool, art):
-    """{version: meta} from the vault clone and the spool (queued, not yet pushed)."""
+    """{version: meta} from the vault clone and the spool (queued, not yet pushed). Vault files
+    are read only from inside the clone: a symlink in the remote vault must not make this read
+    local files (their file names would go into the pushed meta.json)."""
     found = {}
-    for base in (os.path.join(clone, "pages", art), os.path.join(spool, art)):
-        if not os.path.isdir(base):
-            continue
-        for ver in sorted(os.listdir(base)):
-            meta = push.read_json(os.path.join(base, ver, "meta.json"), None) \
-                if os.path.isfile(os.path.join(base, ver, "meta.json")) and not os.path.islink(os.path.join(base, ver)) else None
+    if os.path.isdir(os.path.join(clone, "pages", art)):
+        for ver in sorted(os.listdir(os.path.join(clone, "pages", art))):
+            meta = vault_tag.vault_json(clone, "pages", art, ver, "meta.json")
+            if isinstance(meta, dict) and meta.get("id") == art and meta.get("version") == ver:
+                found[ver] = meta
+    queued = os.path.join(spool, art)
+    if os.path.isdir(queued) and not os.path.islink(queued):
+        for ver in sorted(os.listdir(queued)):
+            path = os.path.join(queued, ver, "meta.json")
+            if os.path.islink(os.path.join(queued, ver)) or os.path.islink(path):
+                continue
+            meta = push.read_json(path, None)
             if isinstance(meta, dict) and meta.get("id") == art and meta.get("version") == ver:
                 found[ver] = meta
     return found
 
 
 def next_seq(versions):
+    """One more than the largest stored seq, or 1. A publish reports the artifact's publish
+    count as seq, so this never exceeds the backfilled version's real seq: later publishes
+    still sort after it, and two backfills in the same second keep their order."""
     seqs = [m["seq"] for m in versions.values() if isinstance(m.get("seq"), int) and not isinstance(m.get("seq"), bool)]
-    return max(seqs) + 1 if seqs else None
+    return max(seqs, default=0) + 1
 
 
 def check(cwd, refs, env=os.environ):
@@ -124,10 +135,18 @@ def add(cwd, url, version, folder, title=None, capabilities=(), env=os.environ):
             return "refused", f"{art} looks like it contains a credential; nothing was queued"
         if result != "queued":
             return "skipped", f"{art} was not queued (the page contains vault:skip)"
+        try:  # capture reports supporting files it could not keep (unsafe path, name clash)
+            note = json.loads(hook_out.getvalue() or "{}").get("systemMessage", "")
+        except ValueError:
+            note = ""
+        partial = re.search(r"略過 (\d+) 個子檔案", note)
         meta_path = os.path.join(spool, art, safe, "meta.json")
         meta = push.read_json(meta_path, {})
         meta["source"] = "backfill"  # still under the lock: no push can take it before this
         push.write_json(meta_path, meta)
+        if partial:
+            return "partial", (f"{art} {safe} queued as \"{meta.get('title')}\" without {partial.group(1)} supporting "
+                               "file(s) whose path could not be stored; the rest is pushed at the end of this turn")
         return "queued", f"{art} {safe} queued as \"{meta.get('title')}\" ({meta.get('type')}); it is pushed at the end of this turn"
 
 
@@ -156,7 +175,7 @@ def main(argv):
             caps = [c for c in opts.get("capabilities", "").split(",") if c]
             status, msg = add(cwd, opts["url"], opts["version"], opts["files"], opts.get("title"), caps, env)
             print(f"{status}\t{msg}")
-            return 0 if status in ("queued", "skipped") else 1
+            return 0 if status in ("queued", "partial", "skipped") else 1
     except (BackfillError, vault_tag.TagError, vault_page.VaultBusy) as e:
         print(f"artifact-vault: {e}", file=sys.stderr)
         return 1
