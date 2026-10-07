@@ -70,7 +70,7 @@ class PurgeTest(unittest.TestCase):
         self.patch.stop()
 
     def remote_history(self, path):
-        return run("git", "log", "--all", "--format=%h", "--", path, cwd=self.bare).split()
+        return run("git", "log", "--all", "--full-history", "--format=%h", "--", path, cwd=self.bare).split()
 
     def remote_files(self):
         return run("git", "ls-tree", "-r", "--name-only", "main", cwd=self.bare).split()
@@ -298,6 +298,25 @@ class PurgeTest(unittest.TestCase):
         self.assertEqual(run("git", "ls-tree", "-r", "--name-only", "main", cwd=bare).split(), ["purged/Early.json"])
         m.push()
         self.assertNotIn(b"early secret", all_objects(bare))
+
+    def test_a_page_only_on_a_merged_side_branch_is_found_and_removed(self):
+        seed = os.path.realpath(tempfile.mkdtemp())
+        run("git", "clone", "-q", self.bare, seed)
+        run("git", "checkout", "-q", "-b", "side", cwd=seed)
+        os.makedirs(os.path.join(seed, "pages", "Side", "v1"))
+        with open(os.path.join(seed, "pages", "Side", "v1", "index.html"), "w") as fh:
+            fh.write("side secret")
+        run("git", "add", "-A", cwd=seed)
+        run("git", "commit", "-qm", "side", cwd=seed)
+        run("git", "checkout", "-q", "main", cwd=seed)
+        run("git", "merge", "-q", "-s", "ours", "--no-edit", "side", cwd=seed)  # the result drops the page
+        run("git", "push", "-q", "origin", "main", cwd=seed)
+        with mock.patch.dict(os.environ, self.a.env):
+            self.assertTrue(vault_purge.plan(self.a.root, "Side", self.a.env)["commits"])
+            vault_purge.run(self.a.root, "Side", "Side", None, self.a.env)
+        run("git", "gc", "-q", "--prune=now", cwd=self.bare)
+        self.assertEqual(self.remote_history("pages/Side"), [])
+        self.assertNotIn(b"side secret", all_objects(self.bare))
 
     def test_cli_plan_and_run(self):
         script = os.path.join(HERE, "..", "plugin", "scripts", "vault_purge.py")

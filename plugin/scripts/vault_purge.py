@@ -39,7 +39,9 @@ def history(clone, art):
     """[(short sha, subject)] of commits on the branch that touch the page."""
     if not push.head(clone):
         return []  # the vault has no commits yet
-    out = push.git("log", "--format=%h %s", "--", *paths_for(art), cwd=clone)
+    # --full-history: without it git simplifies merges away and misses a side branch that held
+    # the page even though the merge result does not.
+    out = push.git("log", "--full-history", "--format=%h %s", "--", *paths_for(art), cwd=clone)
     return [tuple(line.split(" ", 1)) if " " in line else (line, "") for line in out.splitlines() if line]
 
 
@@ -76,7 +78,7 @@ def run(cwd, ref, confirm, author=None, env=os.environ):
             push.retire(os.path.join(spool, art, ver), trash)
         branch = push.current_branch(clone)
         lease = push.rev(clone, f"refs/remotes/origin/{branch}") or ""  # "": the branch must not exist yet
-        others = push.git("log", "--format=%H", "--", ".", *[f":(exclude){p}" for p in paths_for(art)],
+        others = push.git("log", "--full-history", "--format=%H", "--", ".", *[f":(exclude){p}" for p in paths_for(art)],
                           cwd=clone).strip() if push.head(clone) else ""
         if history(clone, art) and not others:
             # Every commit only touched this page: nothing would be left to rewrite onto.
@@ -103,7 +105,7 @@ def run(cwd, ref, confirm, author=None, env=os.environ):
                                    "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")})
             push.git("add", "-f", "--", marker, cwd=clone)
             push.git("commit", "--quiet", "-m", f"purge: {art}", cwd=clone)  # the id only: a title may be the secret
-        if push.git("log", "--format=%h", "HEAD", "--", *paths_for(art), cwd=clone).strip():
+        if push.git("log", "--full-history", "--format=%h", "HEAD", "--", *paths_for(art), cwd=clone).strip():
             push.mirror_remote(clone)
             raise PurgeError("the page is still in the rewritten branch; nothing pushed")
         try:
@@ -119,7 +121,7 @@ def run(cwd, ref, confirm, author=None, env=os.environ):
             push.git("update-ref", "-d", ref_line, cwd=clone)
         push.git("reflog", "expire", "--expire=now", "--all", cwd=clone)
         push.git("gc", "--quiet", "--prune=now", cwd=clone, timeout=600)
-        if push.git("log", "--all", "--format=%h", "--", *paths_for(art), cwd=clone).strip():
+        if push.git("log", "--all", "--full-history", "--format=%h", "--", *paths_for(art), cwd=clone).strip():
             raise PurgeError("pushed, but this clone still holds the page; delete the clone folder to be sure")
         return {"id": art, "vault": found["name"], "branch": branch, "head": push.head(clone)[:12]}
 
