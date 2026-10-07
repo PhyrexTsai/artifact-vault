@@ -111,7 +111,8 @@ def set_type(cwd, ref, kind, author, env=os.environ):
         route = os.path.join(data, "spool", found["key"], "vault.json")
         push.write_json(route, {"vault": found["vault"], "name": found["name"]})
         try:
-            push.push(clone, os.path.join(data, "spool", found["key"]))
+            push.push(clone, os.path.join(data, "spool", found["key"]),
+                      trust=lambda h: push.trusted_head(data, found["key"], clone, h))
         except RuntimeError as e:
             return f"{art} is now {kind}; the commit is saved and will be pushed later ({e})"
         return f"{art} is now {kind}"

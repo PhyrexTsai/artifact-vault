@@ -195,6 +195,46 @@ class PurgeTest(unittest.TestCase):
         self.assertEqual(self.remote_history("pages/Gone"), [])
         self.assertIn("pages/Late/v1/index.html", self.remote_files())
 
+    def test_a_vault_that_only_held_the_page(self):
+        base = os.path.realpath(tempfile.mkdtemp())
+        bare = os.path.join(base, "solo-artifact.git")
+        run("git", "init", "-q", "--bare", "-b", "main", bare)
+        m = Machine(bare)
+        m.publish("Gone", "v1", 1, "lonely secret")
+        m.push()
+        with mock.patch.dict(os.environ, m.env):
+            vault_purge.run(m.root, "Gone", "Gone", None, m.env)
+        run("git", "gc", "-q", "--prune=now", cwd=bare)
+        self.assertEqual(run("git", "ls-tree", "-r", "--name-only", "main", cwd=bare).split(), ["purged/Gone.json"])
+        self.assertNotIn(b"lonely secret", all_objects(bare))
+        m.publish("Next", "v1", 1)
+        self.assertTrue(m.push().get("ok"))
+        self.assertIn("pages/Next/v1/index.html", run("git", "ls-tree", "-r", "--name-only", "main", cwd=bare))
+
+    def test_after_a_rewrite_during_push_the_next_runs_keep_working(self):
+        b = Machine(self.bare)
+        b.publish("Gone", "v3", 3, "secret three")
+        b.push()  # b's clone now has Gone and the old history
+        b.publish("Other", "v1", 1)
+        real = push.git
+        state = {"done": False}
+
+        def purge_first(*args, **kw):
+            if args[:1] == ("push",) and not state["done"] and kw.get("cwd", "").startswith(b.data):
+                state["done"] = True
+                with mock.patch.object(push, "git", real):
+                    self.purge()
+            return real(*args, **kw)
+
+        with mock.patch.object(push, "git", side_effect=purge_first):
+            b.push()
+        for _ in range(2):
+            result = b.push()
+            self.assertTrue(result.get("ok"), result)
+        self.assertIn("pages/Other/v1/index.html", self.remote_files())
+        run("git", "gc", "-q", "--prune=now", cwd=self.bare)
+        self.assertEqual(self.remote_history("pages/Gone"), [])
+
     def test_cli_plan_and_run(self):
         script = os.path.join(HERE, "..", "plugin", "scripts", "vault_purge.py")
         env = {k: v for k, v in {**os.environ, **IDENT}.items() if k != "CLAUDE_PLUGIN_DATA"}

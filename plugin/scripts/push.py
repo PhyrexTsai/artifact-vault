@@ -115,12 +115,8 @@ def ensure_clone(url, clone, spool=None):
     if os.path.isdir(os.path.join(clone, ".git")):
         if not git("ls-remote", "--heads", "origin", cwd=clone).strip():
             return notes  # the vault has no branch yet: the first push creates it
-        notes = follow_rewrite(clone, spool)
-        try:
-            git("pull", "--rebase", "--quiet", "origin", current_branch(clone), cwd=clone)
-        except RuntimeError:
-            subprocess.run(["git", "rebase", "--abort"], cwd=clone, capture_output=True)
-            raise
+        notes = follow_rewrite(clone, spool)  # fetches, and handles a rewritten remote
+        rebase_onto_fetched(clone)
         return notes
     os.makedirs(os.path.dirname(clone), exist_ok=True)
     tmp = f"{clone}.cloning{os.getpid()}"
@@ -138,6 +134,16 @@ def ensure_clone(url, clone, spool=None):
 def rev(clone, name):
     r = subprocess.run(["git", "rev-parse", "--verify", "-q", name], cwd=clone, capture_output=True, text=True, env=git_env())
     return r.stdout.strip() or None
+
+
+def rebase_onto_fetched(clone):
+    """Rebase onto the remote branch as follow_rewrite() fetched and checked it. Never fetch
+    again here: a purge landing in between would be replayed onto unchecked history."""
+    try:
+        git("rebase", "--quiet", f"refs/remotes/origin/{current_branch(clone)}", cwd=clone)
+    except RuntimeError:
+        subprocess.run(["git", *NO_HOOKS, "rebase", "--abort"], cwd=clone, capture_output=True)
+        raise  # never leave the clone mid-rebase; the commits stay and the next run retries
 
 
 def follow_rewrite(clone, spool):
@@ -425,7 +431,7 @@ def push_vault(data_dir, key):
         check_purged(clone)
         ahead = commits_to_push(clone)
         if ahead:
-            push(clone, spool)
+            push(clone, spool, trust=lambda h: trusted_head(data_dir, key, clone, h))
         return {"applied": len(queued), "pushed": ahead, **notes, **({"dropped_purged": dropped} if dropped else {})}
 
 
@@ -447,7 +453,7 @@ def check_purged(clone):
         raise RuntimeError(f"{len(back)} purged page(s) are back in this clone's history; not pushing")
 
 
-def push(clone, spool=None):
+def push(clone, spool=None, trust=None):
     try:
         git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
         return
@@ -456,12 +462,9 @@ def push(clone, spool=None):
             raise  # empty vault that rejected the first push: nothing to rebase onto
     # Someone pushed first. That may have been a purge: follow a rewrite before rebasing, so
     # the old history (and the purged page) is never replayed onto the new one.
-    follow_rewrite(clone, spool)
-    try:
-        git("pull", "--rebase", "--quiet", "origin", current_branch(clone), cwd=clone)
-    except RuntimeError:
-        subprocess.run(["git", *NO_HOOKS, "rebase", "--abort"], cwd=clone, capture_output=True)
-        raise  # never leave the clone mid-rebase; the commits stay and the next run retries
+    if follow_rewrite(clone, spool) and trust:
+        trust(head(clone))  # or the next run's roll-back would undo the reset
+    rebase_onto_fetched(clone)
     check_purged(clone)
     git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
 

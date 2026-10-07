@@ -76,7 +76,16 @@ def run(cwd, ref, confirm, author=None, env=os.environ):
         lease = push.rev(clone, f"refs/remotes/origin/{branch}")
         if not lease:
             raise PurgeError("the vault has no pushed branch yet")
-        if history(clone, art):
+        others = push.git("log", "--format=%H", "--", ".", *[f":(exclude){p}" for p in paths_for(art)], cwd=clone).strip()
+        if history(clone, art) and not others:
+            # Every commit only touched this page: nothing would be left to rewrite onto.
+            # Start the branch over with a single root commit (the marker below).
+            push.git("checkout", "-q", "--orphan", "purge-tmp", cwd=clone)
+            push.git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ".", cwd=clone)
+            push.git("clean", "-q", "-f", "-d", "-x", cwd=clone)
+            push.git("branch", "-D", branch, cwd=clone)
+            push.git("branch", "-m", branch, cwd=clone)
+        elif history(clone, art):
             fenv = dict(push.git_env(), FILTER_BRANCH_SQUELCH_WARNING="1")
             # art matched [A-Za-z0-9-]+ in full (parse_id), so it is safe inside the shell command.
             rm = "git rm -r -q --cached --ignore-unmatch -- " + " ".join(paths_for(art))
