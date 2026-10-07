@@ -42,7 +42,10 @@ class Machine:
     def push(self):
         with mock.patch.dict(os.environ, self.env):
             push.main(self.env)
-        return push.read_json(os.path.join(self.data, "state", os.listdir(os.path.join(self.data, "spool"))[0] + "-push.json"), {})
+        spool = os.path.join(self.data, "spool")
+        if not os.path.isdir(spool):
+            return {}  # nothing published or tagged on this machine yet
+        return push.read_json(os.path.join(self.data, "state", os.listdir(spool)[0] + "-push.json"), {})
 
 
 def all_objects(repo):
@@ -122,6 +125,40 @@ class PurgeTest(unittest.TestCase):
         self.assertEqual(self.remote_history("pages/Gone"), [])
         self.assertIn("pages/Other/v1/index.html", self.remote_files())
         self.assertIn("pages/Keep/v2/index.html", self.remote_files())
+
+    def test_a_purge_during_another_push_does_not_bring_the_page_back(self):
+        b = Machine(self.bare)
+        b.push()
+        b.publish("Gone", "v3", 3, "secret three")
+        real = push.git
+        state = {"done": False}
+
+        def purge_first(*args, **kw):  # a's purge lands between b's checks and b's push
+            if args[:1] == ("push",) and not state["done"] and kw.get("cwd", "").startswith(b.data):
+                state["done"] = True
+                with mock.patch.object(push, "git", real):
+                    self.purge()
+            return real(*args, **kw)
+
+        with mock.patch.object(push, "git", side_effect=purge_first):
+            b.push()
+        b.push()
+        run("git", "gc", "-q", "--prune=now", cwd=self.bare)
+        self.assertEqual(self.remote_history("pages/Gone"), [])
+        self.assertIn("purged/Gone.json", self.remote_files())
+
+    def test_unpushed_tags_survive_a_rewrite(self):
+        import vault_tag
+        b = Machine(self.bare)
+        b.push()
+        with mock.patch.dict(os.environ, b.env), mock.patch.object(push, "push", side_effect=RuntimeError("offline")):
+            vault_tag.set_type(b.root, "Keep", "research", "b@example.com", b.env)
+        self.purge()
+        result = b.push()
+        self.assertEqual(result.get("tags_kept"), 1, result)
+        names = [n for n in self.remote_files() if n.startswith("overrides/Keep/")]
+        self.assertEqual(len(names), 1)
+        self.assertEqual(json.loads(run("git", "show", f"main:{names[0]}", cwd=self.bare))["type"], "research")
 
     def test_queued_versions_of_a_purged_page_are_dropped(self):
         b = Machine(self.bare)

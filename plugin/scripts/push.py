@@ -165,8 +165,29 @@ def follow_rewrite(clone, spool):
                     and meta.get("id") == art and meta.get("version") == ver and not os.path.exists(dest):
                 shutil.copytree(src, dest, symlinks=True)
                 respooled += 1
+    # Unpushed category changes: each is one new file under overrides/<id>/. Keep their bytes,
+    # reset, then commit them again (except for pages the remote now lists as purged).
+    added = git("diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", seen, "HEAD", "--", "overrides",
+                cwd=clone).split("\0") if head(clone) and head(clone) != seen else []
+    kept = {}
+    for rel in (p for p in added if p.count("/") == 2):
+        path = os.path.join(clone, *rel.split("/"))
+        if os.path.isfile(path) and not os.path.islink(path):
+            with open(path, "rb") as fh:
+                kept[rel] = fh.read()
     git("reset", "-q", "--hard", f"refs/remotes/origin/{branch}", cwd=clone)
-    return {"history_rewritten": True, "respooled": respooled}
+    purged = purged_ids(clone)
+    kept = {rel: data for rel, data in kept.items() if rel.split("/")[1] not in purged}
+    for rel, data in kept.items():
+        path = os.path.join(clone, *rel.split("/"))
+        inside_clone(clone, path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        git("add", "-f", "--", rel, cwd=clone)
+    if kept:
+        git("commit", "--quiet", "-m", f"tag: {len(kept)} change(s) kept after the vault history was rewritten", cwd=clone)
+    return {"history_rewritten": True, "respooled": respooled, **({"tags_kept": len(kept)} if kept else {})}
 
 
 def configure(clone):
@@ -401,12 +422,10 @@ def push_vault(data_dir, key):
         shutil.rmtree(trash, ignore_errors=True)  # leftovers of an interrupted retire()
         for _, folder in queued:  # only now: the commit holds their content
             retire(folder, trash)
-        back = [a for a in purged if git("ls-tree", "--name-only", "HEAD", "--", f"pages/{a}", f"overrides/{a}", cwd=clone).strip()]
-        if back:  # e.g. a commit from a plugin version without this check: never push it
-            raise RuntimeError(f"{len(back)} purged page(s) are back in this clone's history; not pushing")
+        check_purged(clone)
         ahead = commits_to_push(clone)
         if ahead:
-            push(clone)
+            push(clone, spool)
         return {"applied": len(queued), "pushed": ahead, **notes, **({"dropped_purged": dropped} if dropped else {})}
 
 
@@ -420,18 +439,31 @@ def commits_to_push(clone):
     return int(r.stdout.strip() or 0)
 
 
-def push(clone):
+def check_purged(clone):
+    """Never push a purged page, e.g. one committed by a plugin version without these checks."""
+    back = [a for a in purged_ids(clone)
+            if git("ls-tree", "--name-only", "HEAD", "--", f"pages/{a}", f"overrides/{a}", cwd=clone).strip()]
+    if back:
+        raise RuntimeError(f"{len(back)} purged page(s) are back in this clone's history; not pushing")
+
+
+def push(clone, spool=None):
     try:
         git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
+        return
     except RuntimeError:
         if not git("ls-remote", "--heads", "origin", cwd=clone).strip():
             raise  # empty vault that rejected the first push: nothing to rebase onto
-        try:
-            git("pull", "--rebase", "--quiet", "origin", current_branch(clone), cwd=clone)  # someone pushed first
-        except RuntimeError:
-            subprocess.run(["git", *NO_HOOKS, "rebase", "--abort"], cwd=clone, capture_output=True)
-            raise  # never leave the clone mid-rebase; the commits stay and the next run retries
-        git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
+    # Someone pushed first. That may have been a purge: follow a rewrite before rebasing, so
+    # the old history (and the purged page) is never replayed onto the new one.
+    follow_rewrite(clone, spool)
+    try:
+        git("pull", "--rebase", "--quiet", "origin", current_branch(clone), cwd=clone)
+    except RuntimeError:
+        subprocess.run(["git", *NO_HOOKS, "rebase", "--abort"], cwd=clone, capture_output=True)
+        raise  # never leave the clone mid-rebase; the commits stay and the next run retries
+    check_purged(clone)
+    git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
 
 
 def main(env=os.environ):
