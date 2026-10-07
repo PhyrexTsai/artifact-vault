@@ -120,6 +120,23 @@ class BackfillTest(unittest.TestCase):
         meta = json.loads(self.remote("pages/Sym1/v2/meta.json"))
         self.assertNotIn("private-name.txt", json.dumps(meta))
 
+    def test_an_older_version_than_a_stored_one_is_skipped(self):
+        self.publish("Race", "1791300000-bbbb", 7)  # captured while the older one was being read
+        push.main(self.env)
+        status, msg = self.add("Race", "1791299089-aaaa", {"index.html": "<p>old</p>"})
+        self.assertEqual(status, "skipped")
+        self.assertIn("older than 1791300000-bbbb", msg)
+
+    def test_a_snapshot_starts_the_file_set_over(self):
+        self.assertEqual(vault_backfill.files_as_of({
+            "v1": {"seq": 1, "files_written": ["old.js"]},
+            "v4": {"seq": 4, "snapshot": True, "files_written": ["a.css"]},
+            "v5": {"seq": 5, "files_written": ["b.css"]},
+        }), {"a.css", "b.css"})
+        self.add("Snap", "v1", {"index.html": "<p>1</p>"})
+        push.main(self.env)
+        self.assertIs(json.loads(self.remote("pages/Snap/v1/meta.json"))["snapshot"], True)
+
     def test_supporting_files_capture_cannot_keep_are_reported(self):
         status, msg = self.add("Part1", "v1", {"index.html": "<p>x</p>", "meta.json": "{}", "ok.css": "c"})
         self.assertEqual(status, "partial", msg)

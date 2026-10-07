@@ -11,9 +11,12 @@
       the same checks as a publish (vault:skip, credentials, unsafe paths) and into the same
       spool, so the background push stores it like any other version.
 
-A version already in the library or the spool is skipped. A backfilled version sorts after
-the versions the library already has: its seq is one more than the largest stored seq (1
-when there is none).
+A version already in the library or the spool is skipped, and so is one older than a stored
+version (by the publish time in version names, when they have it). A backfilled version sorts
+after the versions the library already has: its seq is one more than the largest stored seq
+(1 when there is none). It is marked "snapshot": it holds the whole page, so replaying files
+starts over at it, and an older version pushed later from another machine cannot add back a
+file the page no longer has.
 """
 import contextlib
 import io
@@ -78,13 +81,26 @@ def check(cwd, refs, env=os.environ):
 
 def files_as_of(versions):
     """The page's supporting files after replaying the stored versions in order (written files
-    are added, removed ones dropped, server-side copies added)."""
+    are added, removed ones dropped, server-side copies added). A snapshot version (a
+    backfill) holds the whole page, so it starts the set over."""
     files = set()
     for m in sorted(versions.values(), key=lambda m: (m.get("seq") or 0, m.get("captured_at") or "")):
+        if m.get("snapshot"):
+            files = set()
         files |= {p for p in m.get("files_written") or [] if isinstance(p, str)}
         files -= {p for p in m.get("files_removed") or [] if isinstance(p, str)}
         files |= {r.get("path") for r in m.get("files_remote") or [] if isinstance(r, dict) and isinstance(r.get("path"), str)}
     return files
+
+
+PUBLISHED_AT = re.compile(r"^(\d{10})-")  # observed version names start with the publish time (unix seconds)
+
+
+def published_at(version):
+    """Publish time read from a version name, or None. The format is observed, not documented,
+    so it is only used to refuse an older version, never to order versions."""
+    m = PUBLISHED_AT.match(version or "")
+    return int(m.group(1)) if m else None
 
 
 def page_files(folder):
@@ -118,6 +134,10 @@ def add(cwd, url, version, folder, title=None, capabilities=(), env=os.environ):
             raise BackfillError("--version is empty")
         if safe in versions:
             return "skipped", f"{art} {safe} is already in the library"
+        mine = published_at(safe)
+        newer = [v for v in versions if mine is not None and (published_at(v) or 0) > mine]
+        if newer:  # a publish captured meanwhile is newer: this seq would wrongly sort after it
+            return "skipped", f"{art} {safe} is older than {max(newer)}, which the library already has"
         # A read-back is the whole page, but a version stores only its changes: files the
         # stored versions still have and the page no longer has are recorded as removed.
         files = page_files(folder)
@@ -143,6 +163,7 @@ def add(cwd, url, version, folder, title=None, capabilities=(), env=os.environ):
         meta_path = os.path.join(spool, art, safe, "meta.json")
         meta = push.read_json(meta_path, {})
         meta["source"] = "backfill"  # still under the lock: no push can take it before this
+        meta["snapshot"] = True  # holds every file of the page: replay starts over here
         push.write_json(meta_path, meta)
         if partial:
             return "partial", (f"{art} {safe} queued as \"{meta.get('title')}\" without {partial.group(1)} supporting "
