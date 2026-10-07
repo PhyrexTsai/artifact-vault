@@ -113,6 +113,7 @@ def run(cwd, ref, confirm, author=None, env=os.environ):
         push.git("fetch", "--quiet", "origin", cwd=clone)
         if push.rev(clone, f"refs/remotes/origin/{branch}") != push.head(clone):
             raise PurgeError("pushed, but the remote branch does not match; check the vault")
+        push.mark_synced(clone)  # before dropping objects: the old value still points at the old history
         # Now that no ref points at the old history, drop its objects from this clone too.
         for ref_line in push.git("for-each-ref", "--format=%(refname)", "refs/original", cwd=clone).splitlines():
             push.git("update-ref", "-d", ref_line, cwd=clone)

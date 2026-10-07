@@ -13,7 +13,7 @@ A purge rewrites the library repo's history and force-pushes it. It cannot be un
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/vault_purge.py" --data "${CLAUDE_PLUGIN_DATA}" plan <id or link>
    ```
 
-   Tell the user the title, how many commits and files, and versions waiting on this machine. If `files` is 0 and `commits` is empty, the page is not in the library: say so and stop.
+   Tell the user the title, how many commits and files, and versions waiting on this machine. Stop only when `files` is 0, `commits` is empty and `queued` is empty: the page is not in the library and not waiting to be pushed. If only `queued` has versions, still purge: that drops them and stops any machine from pushing the page later.
 
 2. **Ask the user to confirm by typing the id.** Explain first: history is rewritten, every clone of the library repo must reset afterwards, and the page stays wherever it was already copied (see step 4). Do not continue on a vague "yes".
 

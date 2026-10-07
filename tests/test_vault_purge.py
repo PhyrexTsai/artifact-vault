@@ -235,6 +235,55 @@ class PurgeTest(unittest.TestCase):
         run("git", "gc", "-q", "--prune=now", cwd=self.bare)
         self.assertEqual(self.remote_history("pages/Gone"), [])
 
+    def test_a_page_only_queued_is_dropped_and_blocked(self):
+        self.a.publish("Fresh", "v1", 1, "queued secret")
+        with mock.patch.dict(os.environ, self.a.env):
+            p = vault_purge.plan(self.a.root, "Fresh", self.a.env)
+            self.assertEqual((p["files"], p["commits"], p["queued"]), (0, [], ["v1"]))
+            vault_purge.run(self.a.root, "Fresh", "Fresh", None, self.a.env)
+        self.a.push()
+        self.assertIn("purged/Fresh.json", self.remote_files())
+        self.assertNotIn(b"queued secret", all_objects(self.bare))
+
+    def test_tagging_never_pushes_a_purged_page_back(self):
+        import vault_tag
+        b = Machine(self.bare)
+        b.push()
+        with mock.patch.dict(os.environ, b.env):
+            vault_tag.list_artifacts(b.root, b.env)  # b's clone exists
+        self.purge()
+        with mock.patch.dict(os.environ, b.env):
+            vault_tag.list_artifacts(b.root, b.env)  # b follows the rewrite
+        clone = os.path.join(b.data, "vaults", os.listdir(os.path.join(b.data, "vaults"))[0])
+        # An older plugin version commits the purged page anyway.
+        os.makedirs(os.path.join(clone, "pages", "Gone", "v7"))
+        with open(os.path.join(clone, "pages", "Gone", "v7", "index.html"), "w") as fh:
+            fh.write("old plugin")
+        run("git", "add", "-f", "pages", cwd=clone)
+        run("git", "commit", "-qm", "old plugin", cwd=clone)
+        push.trusted_head(b.data, os.path.basename(clone), clone, push.head(clone))  # that plugin verified it
+        with mock.patch.dict(os.environ, b.env):
+            try:
+                vault_tag.set_type(b.root, "Keep", "research", None, b.env)
+            except vault_tag.TagError:
+                pass
+        self.assertEqual(self.remote_history("pages/Gone"), [])
+
+    def test_an_interrupted_rewrite_is_still_recognised(self):
+        b = Machine(self.bare)
+        b.publish("Gone", "v3", 3, "secret three")
+        b.push()
+        self.purge()
+        clone = os.path.join(b.data, "vaults", os.listdir(os.path.join(b.data, "vaults"))[0])
+        run("git", "-c", "core.hooksPath=/dev/null", "fetch", "-q", "origin", cwd=clone)  # killed right after this fetch
+        b.publish("Other", "v1", 1)
+        result = b.push()
+        self.assertTrue(result.get("ok"), result)
+        self.assertTrue(result.get("history_rewritten"), result)
+        self.assertIn("pages/Other/v1/index.html", self.remote_files())
+        run("git", "gc", "-q", "--prune=now", cwd=self.bare)
+        self.assertEqual(self.remote_history("pages/Gone"), [])
+
     def test_cli_plan_and_run(self):
         script = os.path.join(HERE, "..", "plugin", "scripts", "vault_purge.py")
         env = {k: v for k, v in {**os.environ, **IDENT}.items() if k != "CLAUDE_PLUGIN_DATA"}

@@ -127,6 +127,7 @@ def ensure_clone(url, clone, spool=None):
     configure(tmp)
     if subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=tmp, capture_output=True).returncode == 0:
         git("checkout", "--quiet", cwd=tmp)
+        mark_synced(tmp)
     os.replace(tmp, clone)
     return notes
 
@@ -134,6 +135,17 @@ def ensure_clone(url, clone, spool=None):
 def rev(clone, name):
     r = subprocess.run(["git", "rev-parse", "--verify", "-q", name], cwd=clone, capture_output=True, text=True, env=git_env())
     return r.stdout.strip() or None
+
+
+SYNCED = "refs/vault/synced"  # the remote commit this clone last finished integrating
+
+
+def mark_synced(clone):
+    """Record the remote branch as integrated. Only called once a sync is complete: the
+    remote-tracking ref moves at fetch time, so it cannot tell an interrupted sync apart."""
+    remote = rev(clone, f"refs/remotes/origin/{current_branch(clone)}")
+    if remote:
+        git("update-ref", SYNCED, remote, cwd=clone)
 
 
 def rebase_onto_fetched(clone):
@@ -144,6 +156,7 @@ def rebase_onto_fetched(clone):
     except RuntimeError:
         subprocess.run(["git", *NO_HOOKS, "rebase", "--abort"], cwd=clone, capture_output=True)
         raise  # never leave the clone mid-rebase; the commits stay and the next run retries
+    mark_synced(clone)
 
 
 def follow_rewrite(clone, spool):
@@ -152,7 +165,7 @@ def follow_rewrite(clone, spool):
     clone last saw of it, put this clone's unpushed versions back into the spool, then reset
     to the remote. Version folders are self-contained, so the spool re-applies them."""
     branch = current_branch(clone)
-    seen = rev(clone, f"refs/remotes/origin/{branch}")
+    seen = rev(clone, SYNCED) or rev(clone, f"refs/remotes/origin/{branch}")  # the latter: clones from before
     git("fetch", "--quiet", "origin", cwd=clone)
     remote = rev(clone, f"refs/remotes/origin/{branch}")
     if not seen or not remote or seen == remote:
@@ -193,6 +206,7 @@ def follow_rewrite(clone, spool):
         git("add", "-f", "--", rel, cwd=clone)
     if kept:
         git("commit", "--quiet", "-m", f"tag: {len(kept)} change(s) kept after the vault history was rewritten", cwd=clone)
+    mark_synced(clone)
     return {"history_rewritten": True, "respooled": respooled, **({"tags_kept": len(kept)} if kept else {})}
 
 
@@ -454,8 +468,10 @@ def check_purged(clone):
 
 
 def push(clone, spool=None, trust=None):
+    check_purged(clone)  # every caller (background push, tag) goes through here
     try:
         git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
+        mark_synced(clone)
         return
     except RuntimeError:
         if not git("ls-remote", "--heads", "origin", cwd=clone).strip():
@@ -467,6 +483,7 @@ def push(clone, spool=None, trust=None):
     rebase_onto_fetched(clone)
     check_purged(clone)
     git("push", "--quiet", "-u", "origin", "HEAD", cwd=clone)
+    mark_synced(clone)
 
 
 def main(env=os.environ):
