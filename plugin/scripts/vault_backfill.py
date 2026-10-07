@@ -131,6 +131,8 @@ def add(cwd, url, version, folder, title=None, capabilities=(), env=os.environ):
     with vault_page.locked_vault(cwd, env) as (found, clone):
         if not found:
             raise BackfillError("this project has no vault")
+        if art in push.purged_ids(clone):
+            return "refused", f"{art} was purged from the library; it is not added back"
         spool = os.path.join(env["CLAUDE_PLUGIN_DATA"], "spool", found["key"])
         versions = stored_versions(clone, spool, art)
         safe = re.sub(r"[^A-Za-z0-9._-]", "-", version).strip(".")  # the same name capture stores
