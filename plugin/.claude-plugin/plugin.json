@@ -1,6 +1,6 @@
 {
   "name": "artifact-vault",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Archive published Claude Code artifacts into a git-backed library repo chosen by the project's .claude/artifact-vault.json.",
   "author": { "name": "Phyrex Tsai" },
   "repository": "https://github.com/PhyrexTsai/artifact-vault",
