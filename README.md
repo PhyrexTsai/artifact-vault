@@ -4,7 +4,20 @@ Claude Code plugin that archives published artifacts into a git-backed library r
 
 A project opts in with a `.claude/artifact-vault.json` file that names its library repo. In projects without that file, the plugin does nothing.
 
-> Status: early development. The hooks are placeholders until capture and push are implemented.
+Every publish in an opted-in project is queued by a hook and pushed to the library in the background at the end of the turn.
+
+## Skills
+
+| Skill | What it does |
+|---|---|
+| `page` | Starts a page from one of the library's templates. |
+| `tag` | Changes the category of an archived page. |
+| `backfill` | Reads pages published earlier back from claude.ai and adds them. |
+| `setup` | Reports the library, the last push, and anything waiting. |
+
+### Backfill: one known limit
+
+A read-back page carries no publish count, so a backfilled version is numbered after the versions the library already has. If another machine holds an unpushed capture of the same page that is older than the live version, it arrives later with a higher number and sorts as the newest. Before backfilling a page that was also published from another machine, let that machine push first (open Claude Code there, or run `/artifact-vault:setup`). Pages published before the project used a library, the usual case, are not affected.
 
 ## Install
 

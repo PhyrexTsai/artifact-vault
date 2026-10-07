@@ -7,6 +7,8 @@ description: Add existing claude.ai artifacts to the project's artifact library 
 
 Pages normally enter the library when they are published. This skill adds pages that were published earlier: Claude reads each page back from claude.ai with the Artifact tool, and the script queues it exactly like a publish (same vault:skip and credential checks).
 
+A read-back page has no publish count, so its version is numbered after what the library has. If the page was also published from another machine that has not pushed yet, an older version from there can later sort as the newest: when the user says the page was edited elsewhere, ask them to let that machine push first (see the README).
+
 Only the person's own artifacts can be read back in full. For a page owned by someone else, the Artifact tool returns a summary, not the files: tell the user that page must be backfilled by its owner.
 
 ## One page: `backfill <link>`

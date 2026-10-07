@@ -17,6 +17,10 @@ after the versions the library already has: its seq is one more than the largest
 (1 when there is none). It is marked "snapshot": it holds the whole page, so replaying files
 starts over at it, and an older version pushed later from another machine cannot add back a
 file the page no longer has.
+
+Known limit: the read-back has no publish count. An older capture of the same page that
+another machine has not pushed yet arrives later with its real, higher seq and sorts as the
+newest. Backfill is meant for pages published before the project used a vault.
 """
 import contextlib
 import io
